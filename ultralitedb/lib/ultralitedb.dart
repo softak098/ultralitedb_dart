@@ -5,8 +5,6 @@ export 'src/bson/bson.dart';
 export 'src/bson/writer.dart';
 export 'src/bson/reader.dart';
 
-export 'src/builder/anotations.dart';
-
 // Engine — Query
 export 'src/engine/query/query.dart';
 
