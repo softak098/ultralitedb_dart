@@ -3,8 +3,7 @@ import 'package:analyzer/dart/element/nullability_suffix.dart';
 import 'package:analyzer/dart/element/type.dart';
 import 'package:build/build.dart';
 import 'package:source_gen/source_gen.dart';
-
-import 'anotations.dart';
+import 'package:ultralitedb/ultralitedb.dart';
 
 /// Generates for every class annotated with [@BsonSerializable]:
 ///
@@ -61,12 +60,13 @@ class BsonSerializableGenerator
     return result;
   }
 
-  ConstructorElement _findConstructor(ClassElement cls) =>
-      cls.constructors.firstWhere(
-        (c) => (c.name?.isNotEmpty ?? false) && !c.isFactory,
-        orElse: () => cls.constructors.firstWhere((c) => !c.isFactory,
-            orElse: () => cls.constructors.first),
-      );
+  ConstructorElement _findConstructor(ClassElement cls) {
+    return cls.constructors.firstWhere(
+      (c) => (c.name == "new") && !c.isFactory,
+//      orElse: () => cls.constructors.firstWhere((c) => !c.isFactory,
+      //orElse: () => cls.constructors.first),
+    );
+  }
 
   // ── toBsonDocument (extension) ─────────────────────────────────────────────
 
@@ -162,8 +162,9 @@ class BsonSerializableGenerator
     final arg = type.typeArguments.firstOrNull;
     final inner = arg != null ? _encode('e', arg) : 'BsonValue.from(e)';
     final call =
-        'BsonArray.from(${nullable ? '$expr?' : expr}.map((e) => $inner))';
-    return nullable ? '($call ?? BsonValue.nullValue())' : call;
+        'BsonArray.from(${nullable ? '$expr!' : expr}.map((e) => $inner))';
+
+    return nullable ? '$expr == null ? BsonValue.nullValue() : $call' : call;
   }
 
   String _encodeMap(String expr, InterfaceType type, bool nullable) {
@@ -183,14 +184,18 @@ class BsonSerializableGenerator
   String _decode(String expr, DartType type) {
     final nullable = type.nullabilitySuffix == NullabilitySuffix.question;
 
-    if (type.isDartCoreBool)
+    if (type.isDartCoreBool) {
       return nullable ? '$expr.asBoolean' : '($expr.asBoolean ?? false)';
-    if (type.isDartCoreInt)
+    }
+    if (type.isDartCoreInt) {
       return nullable ? '$expr.asInt32' : '($expr.asInt32 ?? 0)';
-    if (type.isDartCoreDouble)
+    }
+    if (type.isDartCoreDouble) {
       return nullable ? '$expr.asDouble' : '($expr.asDouble ?? 0.0)';
-    if (type.isDartCoreString)
+    }
+    if (type.isDartCoreString) {
       return nullable ? '$expr.asString' : "($expr.asString ?? '')";
+    }
 
     if (_isNamed(type, 'DateTime')) {
       return nullable

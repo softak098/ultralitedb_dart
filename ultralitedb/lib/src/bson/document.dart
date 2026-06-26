@@ -6,12 +6,10 @@ class BsonDocument extends BsonValue {
   final Map<String, BsonValue> _fields;
   int _cachedBytesCount = 0;
 
-  BsonDocument() : _fields = {}, super._init(BsonType.document, null);
+  BsonDocument([Map<String, BsonValue>? fields]) : _fields = fields ?? {}, super._init(BsonType.document, null);
 
   /// Creates a document from a plain Dart map; values are auto-converted.
-  BsonDocument.from(Map<String, dynamic> map)
-    : _fields = {},
-      super._init(BsonType.document, null) {
+  BsonDocument.from(Map<String, dynamic> map) : _fields = {}, super._init(BsonType.document, null) {
     for (final e in map.entries) {
       _fields[e.key] = BsonValue.from(e.value);
     }

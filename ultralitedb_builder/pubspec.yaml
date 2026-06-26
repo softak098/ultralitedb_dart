@@ -1,6 +1,7 @@
-name: ultradblite_builder
+name: ultralitedb_builder
 description: A starting point for Dart libraries or applications.
 version: 1.0.0
+publish_to: none
 # repository: https://github.com/my_org/my_repo
 
 environment:
@@ -10,6 +11,9 @@ dependencies:
   analyzer: ^13.0.0
   build: ^4.0.6
   source_gen: ^4.2.3
+  
+  ultralitedb:
+    path: ../ultralitedb
 
 dev_dependencies:
   lints: ^6.0.0

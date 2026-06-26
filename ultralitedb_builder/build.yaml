@@ -4,7 +4,7 @@ builders:
     builder_factories: ["bsonSerializableBuilder"]
     build_extensions:
       ".dart":
-        - ".bson.g.dart"
+        - ".g.dart"
     auto_apply: dependents
     build_to: source
           
