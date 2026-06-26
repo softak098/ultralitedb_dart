@@ -1,0 +1,19 @@
+name: ultralitedb
+description: Port of C# UltraLiteDB to Dart for usage in Flutter projects.
+version: 0.0.1
+repository: https://github.com/softak098/ultralitedb_dart.git
+
+environment:
+  sdk: ^3.12.0
+
+# Add regular dependencies here.
+dependencies:
+  analyzer: ^13.0.0
+  build: ^4.0.6
+  source_gen: ^4.2.3
+  # path: ^1.9.0
+
+dev_dependencies:
+  build_runner: ^2.15.0
+  lints: ^6.0.0
+  test: ^1.25.6

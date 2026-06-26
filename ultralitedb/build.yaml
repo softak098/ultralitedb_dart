@@ -1,0 +1,10 @@
+builders:
+  bson_serializable:
+    import: "package:ultralitedb/bson_builder.dart"
+    builder_factories: ["bsonSerializableBuilder"]
+    build_extensions:
+      ".dart":
+        - ".bson.g.dart"
+    auto_apply: dependents
+    build_to: source
+          
