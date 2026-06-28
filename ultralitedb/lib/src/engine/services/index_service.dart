@@ -203,9 +203,12 @@ class IndexService {
       if (page.freeBytes >= needed) return page;
     }
 
-    IndexPage? prev = index.freeIndexPageID != PageAddress.emptyPageId ? _pager.getPage<IndexPage>(index.freeIndexPageID) : null;
+    IndexPage? last;
+    if (index.freeIndexPageID != PageAddress.emptyPageId) {
+      last = _pager.getPage<IndexPage>(index.freeIndexPageID);
+    }
 
-    final newPage = _pager.newPage<IndexPage>((id) => IndexPage(id), prev);
+    final newPage = _pager.newPage<IndexPage>((id) => IndexPage(id), last);
     index.freeIndexPageID = newPage.pageID;
     if (index.page != null) _pager.setDirty(index.page!);
     return newPage;

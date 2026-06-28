@@ -25,10 +25,7 @@ class CollectionPage extends BasePage {
   CollectionPage(super.pageID)
     : freeDataPageID = PageAddress.emptyPageId,
       documentCount = 0,
-      indexes = List.generate(
-        CollectionIndex.maxIndexes,
-        (i) => CollectionIndex(slot: i),
-      ) {
+      indexes = List.generate(CollectionIndex.maxIndexes, (i) => CollectionIndex(slot: i)) {
     pageType = PageType.collection;
   }
 
@@ -47,6 +44,7 @@ class CollectionPage extends BasePage {
 
   /// Returns the index for [field], or `null` if not found.
   CollectionIndex? getIndex(String field) {
+    if (field.isEmpty) return null;
     for (final idx in indexes) {
       if (idx.field == field) return idx;
     }
@@ -60,11 +58,7 @@ class CollectionPage extends BasePage {
     freeDataPageID = bd.getUint32(_pFreeDataPage, Endian.little);
     documentCount = bd.getUint32(_pDocCount, Endian.little);
     for (var i = 0; i < CollectionIndex.maxIndexes; i++) {
-      indexes[i] = CollectionIndex._read(
-        bd,
-        _pIndexes + i * CollectionIndex.slotSize,
-        i,
-      )..page = this;
+      indexes[i] = CollectionIndex._read(bd, _pIndexes + i * CollectionIndex.slotSize, i)..page = this;
     }
   }
 

@@ -44,9 +44,9 @@ class PageService {
   // ── Page access ───────────────────────────────────────────────────────────
 
   T getPage<T extends BasePage>(int pageID) {
-    final cached = _cache.getPage<T>(pageID);
-    if (cached != null) return cached;
-    final page = _loadFromDisk(pageID);
+    var page = _cache.getPage<BasePage>(pageID);
+    if (page != null) return page as T;
+    page = _loadFromDisk(pageID);
     _cache.addPage(page);
     return page as T;
   }
@@ -55,10 +55,7 @@ class PageService {
 
   // ── Allocation ────────────────────────────────────────────────────────────
 
-  T newPage<T extends BasePage>(
-    T Function(int pageID) factory, [
-    BasePage? prevPage,
-  ]) {
+  T newPage<T extends BasePage>(T Function(int pageID) factory, [BasePage? prevPage]) {
     final T page;
 
     if (_header.freeEmptyPageId != PageAddress.emptyPageId) {

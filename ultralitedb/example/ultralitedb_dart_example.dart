@@ -49,6 +49,12 @@ void tArrayBulk() {
     p["BatchId"] = i - 11;
 
     ps.add(p);
+
+    if (i > 0 && i % 30000 == 0) {
+      col.insertAll(ps);
+      ps.clear();
+    }
+    //
   }
 
   col.insertAll(ps);
