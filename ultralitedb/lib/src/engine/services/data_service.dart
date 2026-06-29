@@ -19,17 +19,14 @@ class DataService {
 
   // ── Write ─────────────────────────────────────────────────────────────────
 
-  DataBlock insert(CollectionPage col, BsonDocument doc) {
+  Future<DataBlock> insert(CollectionPage col, BsonDocument doc) async {
     final bytes = BsonWriter.serializeDocument(doc);
 
-    final dataPage = _getOrCreateDataPage(col, bytes.length);
+    final dataPage = await _getOrCreateDataPage(col, bytes.length);
     final slot = _nextSlot(dataPage.dataBlocks.keys);
 
     // Inline as much as fits on the DataPage
-    final inlineLen = math.min(
-      bytes.length,
-      dataPage.freeBytes - DataBlock.fixedSize,
-    );
+    final inlineLen = math.min(bytes.length, dataPage.freeBytes - DataBlock.fixedSize);
     final inlineData = Uint8List.sublistView(bytes, 0, inlineLen);
 
     final block = DataBlock(
@@ -44,7 +41,7 @@ class DataService {
 
     // Write remaining bytes into ExtendPage chain
     if (bytes.length > inlineLen) {
-      _writeExtendChain(block, bytes, inlineLen);
+      await _writeExtendChain(block, bytes, inlineLen);
     }
 
     col.documentCount++;
@@ -52,18 +49,17 @@ class DataService {
     return block;
   }
 
-  DataBlock update(CollectionPage col, PageAddress address, BsonDocument doc) {
-    _deleteInternal(col, address, decrementCount: false);
-    return insert(col, doc);
+  Future<DataBlock> update(CollectionPage col, PageAddress address, BsonDocument doc) async {
+    await _deleteInternal(col, address, decrementCount: false);
+    return await insert(col, doc);
   }
 
-  void delete(CollectionPage col, PageAddress address) =>
-      _deleteInternal(col, address, decrementCount: true);
+  Future<void> delete(CollectionPage col, PageAddress address) async => await _deleteInternal(col, address, decrementCount: true);
 
   // ── Read ──────────────────────────────────────────────────────────────────
 
-  BsonDocument read(PageAddress address) {
-    final dataPage = _pager.getPage<DataPage>(address.pageID);
+  Future<BsonDocument> read(PageAddress address) async {
+    final dataPage = await _pager.getPage<DataPage>(address.pageID);
     final block = dataPage.getBlock(address.index)!;
 
     final all = Uint8List(block.dataLength);
@@ -73,7 +69,7 @@ class DataService {
       var offset = block.data.length;
       var extId = block.extendPageID;
       while (extId != PageAddress.emptyPageId && offset < block.dataLength) {
-        final ext = _pager.getPage<ExtendPage>(extId);
+        final ext = await _pager.getPage<ExtendPage>(extId);
         final copyLen = math.min(block.dataLength - offset, ext.content.length);
         all.setRange(offset, offset + copyLen, ext.content);
         offset += copyLen;
@@ -86,12 +82,8 @@ class DataService {
 
   // ── Private ───────────────────────────────────────────────────────────────
 
-  void _deleteInternal(
-    CollectionPage col,
-    PageAddress address, {
-    required bool decrementCount,
-  }) {
-    final dataPage = _pager.getPage<DataPage>(address.pageID);
+  Future<void> _deleteInternal(CollectionPage col, PageAddress address, {required bool decrementCount}) async {
+    final dataPage = await _pager.getPage<DataPage>(address.pageID);
     final block = dataPage.getBlock(address.index);
     if (block == null) return;
 
@@ -99,7 +91,7 @@ class DataService {
     if (block.hasExtend) {
       var extId = block.extendPageID;
       while (extId != PageAddress.emptyPageId) {
-        final ext = _pager.getPage<ExtendPage>(extId);
+        final ext = await _pager.getPage<ExtendPage>(extId);
         final nextId = ext.nextPageID;
         _pager.freePage(ext);
         extId = nextId;
@@ -121,16 +113,13 @@ class DataService {
     }
   }
 
-  void _writeExtendChain(DataBlock block, Uint8List bytes, int startOffset) {
+  Future<void> _writeExtendChain(DataBlock block, Uint8List bytes, int startOffset) async {
     var offset = startOffset;
     ExtendPage? prev;
 
     while (offset < bytes.length) {
-      final ext = _pager.newPage<ExtendPage>((id) => ExtendPage(id), prev);
-      final copyLen = math.min(
-        bytes.length - offset,
-        BasePage.pageAvailableBytes,
-      );
+      final ext = await _pager.newPage<ExtendPage>((id) => ExtendPage(id), prev);
+      final copyLen = math.min(bytes.length - offset, BasePage.pageAvailableBytes);
       ext.content.setRange(0, copyLen, bytes.sublist(offset));
       if (prev == null) block.extendPageID = ext.pageID;
       _pager.setDirty(ext);
@@ -139,21 +128,17 @@ class DataService {
     }
   }
 
-  DataPage _getOrCreateDataPage(CollectionPage col, int neededBytes) {
-    final minFree =
-        DataBlock.fixedSize +
-        math.min(neededBytes, BasePage.pageAvailableBytes);
+  Future<DataPage> _getOrCreateDataPage(CollectionPage col, int neededBytes) async {
+    final minFree = DataBlock.fixedSize + math.min(neededBytes, BasePage.pageAvailableBytes);
 
     if (col.freeDataPageID != PageAddress.emptyPageId) {
-      final page = _pager.getPage<DataPage>(col.freeDataPageID);
+      final page = await _pager.getPage<DataPage>(col.freeDataPageID);
       if (page.freeBytes >= minFree) return page;
     }
 
-    DataPage? prev = col.freeDataPageID != PageAddress.emptyPageId
-        ? _pager.getPage<DataPage>(col.freeDataPageID)
-        : null;
+    DataPage? prev = col.freeDataPageID != PageAddress.emptyPageId ? await _pager.getPage<DataPage>(col.freeDataPageID) : null;
 
-    final newPage = _pager.newPage<DataPage>((id) => DataPage(id), prev);
+    final newPage = await _pager.newPage<DataPage>((id) => DataPage(id), prev);
     col.freeDataPageID = newPage.pageID;
     _pager.setDirty(col);
     return newPage;

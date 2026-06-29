@@ -1,28 +1,28 @@
 import 'package:ultralitedb/ultralitedb.dart';
 
-void main() {
+Future<void> main() async {
   final s = Stopwatch()..start();
 
   print(s.elapsedMilliseconds);
-  //t1Bulk();
+  //await t1Bulk();
 
-  //  t2();
+  //  await t2();
 
-  tArrayBulk();
+  await tArrayBulk();
 
   print(s.elapsedMilliseconds);
 
   s.stop();
 }
 
-void tArrayBulk() {
+Future<void> tArrayBulk() async {
   // Open database (or create if doesn't exist)
-  var db = UltraLiteDatabase.file("products_bulk.db");
+  var db = await UltraLiteDatabase.file("products_bulk.db");
 
   // Get a collection
   var col = db.getCollection("product_colored");
 
-  //   final c = col.count(
+  //   final c = await col.count(
   //     Query.between(
   //       "Price",
   //       BsonValue.fromDouble(100),
@@ -34,8 +34,8 @@ void tArrayBulk() {
 
   //  return;
 
-  //   col.ensureIndex("Price");
-  col.ensureIndex("Color");
+  //   await col.ensureIndex("Price");
+  await col.ensureIndex("Color");
 
   final ps = <BsonDocument>[];
 
@@ -51,31 +51,30 @@ void tArrayBulk() {
     ps.add(p);
 
     if (i > 0 && i % 30000 == 0) {
-      col.insertAll(ps);
+      await col.insertAll(ps);
       ps.clear();
     }
-    //
   }
 
-  col.insertAll(ps);
+  await col.insertAll(ps);
 
-  db.dispose();
+  await db.dispose();
 }
 
-void t1Bulk() {
+Future<void> t1Bulk() async {
   // Open database (or create if doesn't exist)
-  var db = UltraLiteDatabase.file("products_bulk.db");
+  var db = await UltraLiteDatabase.file("products_bulk.db");
 
   // Get a collection
   var col = db.getCollection("product");
 
-  final c = col.count(Query.between("Price", BsonValue.fromDouble(100), BsonValue.fromDouble(200)));
+  final c = await col.count(Query.between("Price", BsonValue.fromInt(100), BsonValue.fromInt(200)));
 
   print(c);
 
   return;
 
-  col.ensureIndex("Price");
+  await col.ensureIndex("Price");
 
   final ps = <BsonDocument>[];
 
@@ -87,29 +86,30 @@ void t1Bulk() {
     ps.add(p);
   }
 
-  col.insertAll(ps);
+  await col.insertAll(ps);
 
-  db.dispose();
+  await db.dispose();
 }
 
-void t1() {
-  var db = UltraLiteDatabase.file("products.db");
+Future<void> t1() async {
+  var db = await UltraLiteDatabase.file("products.db");
 
   // Get a collection
   var col = db.getCollection("product");
-  col.ensureIndex("Price");
+  await col.ensureIndex("Price");
 
   for (var i = 0; i < 10000; i++) {
     var character = BsonDocument();
-    character["Name"] = "Product $i";
+    character["Name"] = "Product $character";
     character["Price"] = i / 15;
 
-    col.insert(character);
+    await col.insert(character);
   }
 
-  db.dispose();
+  await db.dispose();
 }
 
+/*
 void t2() {
   // Open database (or create if doesn't exist)
   var db = UltraLiteDatabase.file("MyData.db");
@@ -158,3 +158,4 @@ void t2() {
   // Don't forget to cleanup!
   db.dispose();
 }
+*/

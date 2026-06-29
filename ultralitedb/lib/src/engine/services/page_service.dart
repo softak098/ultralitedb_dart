@@ -25,28 +25,28 @@ class PageService {
 
   /// Call once after constructing services.
   /// Opens the backing store, recovers from journal if needed, loads header.
-  void initialize([String? password]) {
-    _disk.initialize(password);
+  Future<void> initialize([String? password]) async {
+    await _disk.initialize(password);
 
     // Read header to learn lastPageId (needed for journal boundary check)
-    _header = getPage<HeaderPage>(0);
+    _header = await getPage<HeaderPage>(0);
 
     // Journal recovery: file is longer than data area ⟹ incomplete commit
     final dataAreaSize = BasePage.getSizeOfPages(_header.lastPageId + 1);
-    if (_disk.fileLength > dataAreaSize && _disk.isJournalEnabled) {
+    if ((await _disk.getFileLength()) > dataAreaSize && _disk.isJournalEnabled) {
       _cache.clear(); // discard any cached pages
-      _replayJournal(_header.lastPageId);
+      await _replayJournal(_header.lastPageId);
       _cache.clear(); // discard after replay
-      _header = getPage<HeaderPage>(0); // reload clean header
+      _header = await getPage<HeaderPage>(0); // reload clean header
     }
   }
 
   // ── Page access ───────────────────────────────────────────────────────────
 
-  T getPage<T extends BasePage>(int pageID) {
+  Future<T> getPage<T extends BasePage>(int pageID) async {
     var page = _cache.getPage<BasePage>(pageID);
     if (page != null) return page as T;
-    page = _loadFromDisk(pageID);
+    page = await _loadFromDisk(pageID);
     _cache.addPage(page);
     return page as T;
   }
@@ -55,17 +55,17 @@ class PageService {
 
   // ── Allocation ────────────────────────────────────────────────────────────
 
-  T newPage<T extends BasePage>(T Function(int pageID) factory, [BasePage? prevPage]) {
+  Future<T> newPage<T extends BasePage>(T Function(int pageID) factory, [BasePage? prevPage]) async {
     final T page;
 
     if (_header.freeEmptyPageId != PageAddress.emptyPageId) {
-      final empty = getPage<EmptyPage>(_header.freeEmptyPageId);
+      final empty = await getPage<EmptyPage>(_header.freeEmptyPageId);
       _header.freeEmptyPageId = empty.nextPageID;
       page = factory(empty.pageID);
     } else {
       _header.lastPageId++;
       page = factory(_header.lastPageId);
-      _disk.setLength((_header.lastPageId + 1) * BasePage.pageSize);
+      await _disk.setLength((_header.lastPageId + 1) * BasePage.pageSize);
     }
 
     page
@@ -95,18 +95,20 @@ class PageService {
     _cache.addPage(empty);
   }
 
-  Iterable<T> getSeqPages<T extends BasePage>(int firstPageID) sync* {
+  Future<Iterable<T>> getSeqPages<T extends BasePage>(int firstPageID) async {
+    final results = <T>[];
     var id = firstPageID;
     while (id != PageAddress.emptyPageId) {
-      final page = getPage<T>(id);
-      yield page;
+      final page = await getPage<T>(id);
+      results.add(page);
       id = page.nextPageID;
     }
+    return results;
   }
 
-  void flushDirtyPages() {
+  Future<void> flushDirtyPages() async {
     for (final page in _cache.getDirtyPages()) {
-      _disk.writePage(page.pageID, page.toBuffer());
+      await _disk.writePage(page.pageID, page.toBuffer());
     }
     _cache.clearDirty();
   }
@@ -114,18 +116,18 @@ class PageService {
   // ── Private ───────────────────────────────────────────────────────────────
 
   /// Replay journal pages back into the data area, then remove journal.
-  void _replayJournal(int lastPageId) {
-    for (final buf in _disk.readJournal(lastPageId)) {
+  Future<void> _replayJournal(int lastPageId) async {
+    for (final buf in await _disk.readJournal(lastPageId)) {
       // First 4 bytes of every page buffer = pageID (BasePage._pPageId = 0)
       final pageID = ByteData.sublistView(buf).getUint32(0, Endian.little);
-      _disk.writePage(pageID, buf);
+      await _disk.writePage(pageID, buf);
     }
-    _disk.clearJournal(lastPageId);
-    _disk.flush();
+    await _disk.clearJournal(lastPageId);
+    await _disk.flush();
   }
 
-  BasePage _loadFromDisk(int pageID) {
-    final buffer = _disk.readPage(pageID);
+  Future<BasePage> _loadFromDisk(int pageID) async {
+    final buffer = await _disk.readPage(pageID);
     final bd = ByteData.sublistView(buffer);
     final type = PageType.fromByte(bd.getUint8(4)); // offset 4 = pageType
 

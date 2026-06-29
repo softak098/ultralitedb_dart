@@ -23,7 +23,7 @@ class TransactionService {
   /// 2. Persist dirty pages to the data area.
   /// 3. Remove journal (if enabled).
   /// 4. Flush OS buffers.
-  void commit() {
+  Future<void> commit() async {
     if (!_active) throw StateError('No active transaction to commit');
 
     final dirty = _pager.cache.getDirtyPages();
@@ -32,33 +32,32 @@ class TransactionService {
     if (dirty.isNotEmpty) {
       if (_disk.isJournalEnabled) {
         // Write new page state to journal BEFORE touching data area
-        _disk.writeJournal(dirty.map((p) => p.toBuffer()).toList(), lastPageId);
+        await _disk.writeJournal(dirty.map((p) => p.toBuffer()).toList(), lastPageId);
       }
 
-      _pager.flushDirtyPages(); // write to data area
+      await _pager.flushDirtyPages(); // write to data area
 
       if (_disk.isJournalEnabled) {
-        _disk.clearJournal(lastPageId); // truncate journal area
+        await _disk.clearJournal(lastPageId); // truncate journal area
       }
 
-      _disk.flush();
+      await _disk.flush();
     }
 
     _active = false;
   }
 
   /// Discards all in-memory changes and re-reads the header from disk.
-  void rollback() {
+  Future<void> rollback() async {
     if (!_active) throw StateError('No active transaction to roll back');
     _pager.cache.clear();
-    _pager
-        .initialize(); // re-reads header (no journal needed — nothing was written)
+    await _pager.initialize(); // re-reads header (no journal needed — nothing was written)
     _active = false;
   }
 
   /// Commit current transaction and immediately begin a new one.
-  void checkpoint() {
-    if (_active) commit();
+  Future<void> checkpoint() async {
+    if (_active) await commit();
     begin();
   }
 }

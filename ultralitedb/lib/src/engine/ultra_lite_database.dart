@@ -27,13 +27,15 @@ class UltraLiteDatabase {
 
   // ── Factories ─────────────────────────────────────────────────────────────
 
-  factory UltraLiteDatabase.file(String filename, {FileOptions? options, String? password, BsonMapper? mapper}) =>
-      UltraLiteDatabase._(
-        UltraLiteEngine.file(filename, options: options, password: password),
-        mapper: mapper,
-      );
+  static Future<UltraLiteDatabase> file(String filename, {FileOptions? options, String? password, BsonMapper? mapper}) async {
+    final engine = await UltraLiteEngine.file(filename, options: options, password: password);
+    return UltraLiteDatabase._(engine, mapper: mapper);
+  }
 
-  factory UltraLiteDatabase.memory({BsonMapper? mapper}) => UltraLiteDatabase._(UltraLiteEngine.memory(), mapper: mapper);
+  static Future<UltraLiteDatabase> memory({BsonMapper? mapper}) async {
+    final engine = await UltraLiteEngine.memory();
+    return UltraLiteDatabase._(engine, mapper: mapper);
+  }
 
   UltraLiteDatabase._(UltraLiteEngine engine, {BsonMapper? mapper}) : _engine = engine, mapper = mapper ?? BsonMapper.global;
 
@@ -54,31 +56,31 @@ class UltraLiteDatabase {
 
   bool collectionExists(String name) => _engine.getCollectionNames().contains(name);
 
-  bool dropCollection(String name) => _engine.dropCollection(name);
+  Future<bool> dropCollection(String name) => _engine.dropCollection(name);
 
-  bool renameCollection(String oldName, String newName) => _engine.renameCollection(oldName, newName);
+  Future<bool> renameCollection(String oldName, String newName) => _engine.renameCollection(oldName, newName);
 
   // ── Transactions ──────────────────────────────────────────────────────────
 
-  bool beginTrans() => _engine.beginTrans();
-  bool commit() => _engine.commit();
-  bool rollback() => _engine.rollback();
+  Future<bool> beginTrans() => _engine.beginTrans();
+  Future<bool> commit() => _engine.commit();
+  Future<void> rollback() => _engine.rollback();
 
   /// Runs [action] inside a single explicit transaction.
   /// Commits on success; rolls back on any exception.
-  T runInTransaction<T>(T Function() action) {
+  Future<T> runInTransaction<T>(Future<T> Function() action) async {
     beginTrans();
     try {
-      final result = action();
-      commit();
+      final result = await action();
+      await commit();
       return result;
     } catch (_) {
-      rollback();
+      await rollback();
       rethrow;
     }
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-  void dispose() => _engine.dispose();
+  Future<void> dispose() => _engine.dispose();
 }

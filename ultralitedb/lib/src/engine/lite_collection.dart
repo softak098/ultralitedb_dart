@@ -10,8 +10,6 @@ import 'ultra_lite_engine.dart';
 /// final col = db.getCollection('users');       // BsonDocument
 /// final col = db.getTypedCollection<User>('users'); // registered type
 /// ```
-///
-/// Maps to C# LiteCollection<T>.
 class LiteCollection<T> {
   final String _name;
   final UltraLiteEngine _engine;
@@ -19,63 +17,55 @@ class LiteCollection<T> {
 
   final BsonAutoId autoId;
 
-  LiteCollection(
-    this._name,
-    this._engine,
-    this._mapper, {
-    this.autoId = BsonAutoId.objectId,
-  });
+  LiteCollection(this._name, this._engine, this._mapper, {this.autoId = BsonAutoId.objectId});
 
   // ── Insert ────────────────────────────────────────────────────────────────
 
-  BsonValue insert(T item) => _engine.insert(_name, _toDoc(item), autoId);
+  Future<BsonValue> insert(T item) => _engine.insert(_name, _toDoc(item), autoId);
 
-  List<BsonValue> insertAll(Iterable<T> items) =>
-      _engine.insertBulk(_name, items.map(_toDoc), autoId: autoId);
+  Future<List<BsonValue>> insertAll(Iterable<T> items) => _engine.insertBulk(_name, items.map(_toDoc), autoId: autoId);
 
   // ── Update ────────────────────────────────────────────────────────────────
 
-  bool update(T item) => _engine.update(_name, _toDoc(item));
+  Future<bool> update(T item) => _engine.update(_name, _toDoc(item));
 
   // ── Delete ────────────────────────────────────────────────────────────────
 
-  bool deleteById(BsonValue id) => _engine.delete(_name, id);
+  Future<bool> deleteById(BsonValue id) => _engine.delete(_name, id);
 
-  int deleteMany(Query query) => _engine.deleteMany(_name, query);
+  Future<int> deleteMany(Query query) => _engine.deleteMany(_name, query);
 
   // ── Find ──────────────────────────────────────────────────────────────────
 
-  Iterable<T> find({
-    Query? query,
-    int skip = 0,
-    int limit = -1,
-    int order = Query.ascending,
-  }) => _engine
-      .find(_name, query: query, skip: skip, limit: limit, order: order)
-      .map(_fromDoc);
+  Future<Iterable<T>> find({Query? query, int skip = 0, int limit = -1, int order = Query.ascending}) async {
+    final docs = await _engine.find(_name, query: query, skip: skip, limit: limit, order: order);
+    return docs.map(_fromDoc);
+  }
 
-  T? findById(BsonValue id) {
-    final doc = _engine.findById(_name, id);
+  Future<T?> findById(BsonValue id) async {
+    final doc = await _engine.findById(_name, id);
     return doc == null ? null : _fromDoc(doc);
   }
 
-  T? findOne(Query query) {
-    final doc = _engine.findOne(_name, query);
+  Future<T?> findOne(Query query) async {
+    final doc = await _engine.findOne(_name, query);
     return doc == null ? null : _fromDoc(doc);
   }
 
-  List<T> findAll({int order = Query.ascending}) => find(order: order).toList();
+  Future<List<T>> findAll({int order = Query.ascending}) async {
+    final results = await find(order: order);
+    return results.toList();
+  }
 
-  int count([Query? query]) => _engine.count(_name, query);
+  Future<int> count([Query? query]) => _engine.count(_name, query);
 
-  bool exists(Query query) => _engine.exists(_name, query);
+  Future<bool> exists(Query query) => _engine.exists(_name, query);
 
   // ── Index ─────────────────────────────────────────────────────────────────
 
-  bool ensureIndex(String field, {bool unique = false}) =>
-      _engine.ensureIndex(_name, field, unique: unique);
+  Future<bool> ensureIndex(String field, {bool unique = false}) => _engine.ensureIndex(_name, field, unique: unique);
 
-  bool dropIndex(String field) => _engine.dropIndex(_name, field);
+  Future<bool> dropIndex(String field) => _engine.dropIndex(_name, field);
 
   // ── Conversion helpers ────────────────────────────────────────────────────
 

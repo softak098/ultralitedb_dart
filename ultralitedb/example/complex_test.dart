@@ -53,7 +53,7 @@ class User {
   String toString() => 'User(id: $id, name: $name, age: $age, tags: $tags, address: $address, createdAt: $createdAt)';
 }
 
-void main() {
+Future<void> main() async {
   // 1. Setup BsonMapper for User and Address
   BsonMapper.global.registerType<User>(
     (user) => BsonMapper.global.toDocument(user.toJson()),
@@ -61,14 +61,14 @@ void main() {
   );
 
   // 2. Open DB (in-memory for testing)
-  final db = UltraLiteDatabase.memory();
+  final db = await UltraLiteDatabase.memory();
 
   try {
     final users = db.getTypedCollection<User>('users');
 
     // 3. Insert initial data
     print('Inserting users...');
-    users.insertAll([
+    await users.insertAll([
       User(
         id: 1,
         name: 'Alice',
@@ -104,42 +104,42 @@ void main() {
     ]);
 
     // 4. Ensure Indexes
-    users.ensureIndex('age');
-    users.ensureIndex('address.city');
+    await users.ensureIndex('age');
+    await users.ensureIndex('address.city');
 
     // 5. Complex Queries
     print('\n--- Queries ---');
 
     // Find users by city (Nested field)
     print('Users in London:');
-    final londoners = users.find(query: Query.eq('address.city', BsonValue.fromString('London')));
+    final londoners = await users.find(query: Query.eq('address.city', BsonValue.fromString('London')));
     londoners.forEach(print);
 
     // Find developers (Array field contains)
     print('\nDevelopers:');
-    final developers = users.find(query: Query.contains('tags', 'developer'));
+    final developers = await users.find(query: Query.contains('tags', 'developer'));
     developers.forEach(print);
 
     // Filter by Age and City (Logical AND)
     print('\nUsers in New York older than 25:');
-    final nySeniors = users.find(
+    final nySeniors = await users.find(
       query: Query.and(Query.eq('address.city', BsonValue.fromString('New York')), Query.gt('age', BsonValue.fromInt(25))),
     );
     nySeniors.forEach(print);
 
     // Filter by Multiple tags (Logical OR)
     print('\nUsers interested in Flutter or C#:');
-    final devInterests = users.find(query: Query.or(Query.contains('tags', 'flutter'), Query.contains('tags', 'c#')));
+    final devInterests = await users.find(query: Query.or(Query.contains('tags', 'flutter'), Query.contains('tags', 'c#')));
     devInterests.forEach(print);
 
     // Range query on dates
     print('\nUsers created before March 2023:');
-    final earlyUsers = users.find(query: Query.lt('createdAt', BsonValue.fromDateTime(DateTime(2023, 3, 1))));
+    final earlyUsers = await users.find(query: Query.lt('createdAt', BsonValue.fromDateTime(DateTime(2023, 3, 1))));
     earlyUsers.forEach(print);
 
     // 6. Updates
     print('\n--- Updates ---');
-    final alice = users.findById(BsonValue.fromInt(1));
+    final alice = await users.findById(BsonValue.fromInt(1));
     if (alice != null) {
       final updatedAlice = User(
         id: alice.id,
@@ -149,15 +149,15 @@ void main() {
         address: alice.address,
         createdAt: alice.createdAt,
       );
-      users.update(updatedAlice);
-      print('Updated Alice: ${users.findById(BsonValue.fromInt(1))}');
+      await users.update(updatedAlice);
+      print('Updated Alice: ${await users.findById(BsonValue.fromInt(1))}');
     }
 
     // 7. Transactions
     print('\n--- Transactions ---');
-    db.runInTransaction(() {
-      users.deleteById(BsonValue.fromInt(2)); // Bye Bob
-      users.insert(
+    await db.runInTransaction(() async {
+      await users.deleteById(BsonValue.fromInt(2)); // Bye Bob
+      await users.insert(
         User(
           id: 5,
           name: 'Eve',
@@ -171,12 +171,13 @@ void main() {
     });
 
     print('Final users list:');
-    users.findAll().forEach(print);
+    final allUsers = await users.findAll();
+    allUsers.forEach(print);
 
     // 8. Error test (Duplicate ID)
     print('\n--- Error Test (Duplicate ID) ---');
     try {
-      users.insert(
+      await users.insert(
         User(
           id: 1, // Already exists
           name: 'Clone',
@@ -190,6 +191,6 @@ void main() {
       print('Caught expected error: $e');
     }
   } finally {
-    db.dispose();
+    await db.dispose();
   }
 }

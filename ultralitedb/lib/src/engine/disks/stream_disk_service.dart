@@ -16,7 +16,7 @@ class StreamDiskService implements IDiskService {
   final Map<int, Uint8List> _pages = {};
 
   @override
-  void initialize([String? password]) {
+  Future<void> initialize([String? password]) async {
     if (_pages.isNotEmpty) return; // already initialized
 
     // Page 0: HeaderPage
@@ -32,22 +32,21 @@ class StreamDiskService implements IDiskService {
   // ── Page I/O ──────────────────────────────────────────────────────────────
 
   @override
-  Uint8List readPage(int pageID) =>
+  Future<Uint8List> readPage(int pageID) async =>
       // Return a copy so callers can't accidentally mutate the store
       Uint8List.fromList(_pages[pageID] ?? Uint8List(BasePage.pageSize));
 
   @override
-  void writePage(int pageID, Uint8List buffer) =>
-      _pages[pageID] = Uint8List.fromList(buffer);
+  Future<void> writePage(int pageID, Uint8List buffer) async => _pages[pageID] = Uint8List.fromList(buffer);
 
   @override
-  void setLength(int fileSize) {
+  Future<void> setLength(int fileSize) async {
     final maxPageID = fileSize ~/ BasePage.pageSize;
     _pages.removeWhere((id, _) => id >= maxPageID);
   }
 
   @override
-  int get fileLength {
+  Future<int> getFileLength() async {
     if (_pages.isEmpty) return 0;
     return (_pages.keys.reduce(math.max) + 1) * BasePage.pageSize;
   }
@@ -58,17 +57,17 @@ class StreamDiskService implements IDiskService {
   bool get isJournalEnabled => false;
 
   @override
-  void writeJournal(List<Uint8List> pages, int lastPageID) {}
+  Future<void> writeJournal(List<Uint8List> pages, int lastPageID) async {}
 
   @override
-  Iterable<Uint8List> readJournal(int lastPageID) => const [];
+  Future<Iterable<Uint8List>> readJournal(int lastPageID) async => const [];
 
   @override
-  void clearJournal(int lastPageID) {}
+  Future<void> clearJournal(int lastPageID) async {}
 
   @override
-  void flush() {} // in-memory — nothing to flush
+  Future<void> flush() async {} // in-memory — nothing to flush
 
   @override
-  void dispose() => _pages.clear();
+  Future<void> dispose() async => _pages.clear();
 }

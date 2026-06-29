@@ -14,42 +14,40 @@ class CollectionService {
 
   // ── Access ────────────────────────────────────────────────────────────────
 
-  CollectionPage? get(String name) {
+  Future<CollectionPage?> get(String name) async {
     final pageId = _pager.header.getCollectionPageId(name);
-    return pageId == null ? null : _pager.getPage<CollectionPage>(pageId);
+    return pageId == null ? null : await _pager.getPage<CollectionPage>(pageId);
   }
 
-  CollectionPage getOrCreate(String name) => get(name) ?? add(name);
+  Future<CollectionPage> getOrCreate(String name) async => (await get(name)) ?? (await add(name));
 
   // ── DDL ───────────────────────────────────────────────────────────────────
 
-  CollectionPage add(String name) {
-    final col = _pager.newPage<CollectionPage>((id) => CollectionPage(id));
+  Future<CollectionPage> add(String name) async {
+    final col = await _pager.newPage<CollectionPage>((id) => CollectionPage(id));
 
     // Slot 0: primary key (_id) — always unique
-    _indexer.createIndex(col, '_id', true);
+    await _indexer.createIndex(col, '_id', true);
 
     _pager.header.addCollection(name, col.pageID);
     _pager.setDirty(_pager.header);
     return col;
   }
 
-  void drop(String name) {
-    final col = get(name);
+  Future<void> drop(String name) async {
+    final col = await get(name);
     if (col == null) return;
 
     // Drop all indexes (frees IndexPage chains)
     for (final idx in col.indexes.where((i) => i.isNotEmpty)) {
-      _indexer.dropIndex(idx);
+      await _indexer.dropIndex(idx);
     }
 
     // Free DataPage chain and any ExtendPage chains within them
-    for (final dataPage in _pager.getSeqPages<DataPage>(col.freeDataPageID)) {
+    for (final dataPage in await _pager.getSeqPages<DataPage>(col.freeDataPageID)) {
       for (final block in dataPage.dataBlocks.values) {
         if (block.hasExtend) {
-          for (final extPage in _pager.getSeqPages<ExtendPage>(
-            block.extendPageID,
-          )) {
+          for (final extPage in await _pager.getSeqPages<ExtendPage>(block.extendPageID)) {
             _pager.freePage(extPage);
           }
         }
@@ -62,10 +60,10 @@ class CollectionService {
     _pager.freePage(col);
   }
 
-  void rename(String oldName, String newName) {
-    final col = get(oldName);
+  Future<void> rename(String oldName, String newName) async {
+    final col = await get(oldName);
     if (col == null) throw StateError('Collection "$oldName" not found');
-    if (get(newName) != null) {
+    if ((await get(newName)) != null) {
       throw StateError('Collection "$newName" already exists');
     }
     _pager.header.removeCollection(oldName);
