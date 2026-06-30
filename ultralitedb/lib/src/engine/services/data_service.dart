@@ -51,10 +51,10 @@ class DataService {
 
   Future<DataBlock> update(CollectionPage col, PageAddress address, BsonDocument doc) async {
     await _deleteInternal(col, address, decrementCount: false);
-    return await insert(col, doc);
+    return insert(col, doc);
   }
 
-  Future<void> delete(CollectionPage col, PageAddress address) async => await _deleteInternal(col, address, decrementCount: true);
+  Future<void> delete(CollectionPage col, PageAddress address) => _deleteInternal(col, address, decrementCount: true);
 
   // ── Read ──────────────────────────────────────────────────────────────────
 

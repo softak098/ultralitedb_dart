@@ -9,16 +9,14 @@ import 'ultra_lite_engine.dart';
 ///
 /// ```dart
 /// // File-backed
-/// final db = UltraLiteDatabase.file('app.db');
+/// final db = await UltraLiteDatabase.file('app.db');
 /// final users = db.getCollection('users');
-/// users.insert(BsonDocument({'name': BsonValue.fromString('Alice')}));
-/// db.dispose();
+/// await users.insert(BsonDocument({'name': BsonValue.fromString('Alice')}));
+/// await db.dispose();
 ///
 /// // In-memory (tests / ephemeral)
-/// final db = UltraLiteDatabase.memory();
+/// final db = await UltraLiteDatabase.memory();
 /// ```
-///
-/// Maps to C# LiteDatabase.
 class UltraLiteDatabase {
   final UltraLiteEngine _engine;
 
@@ -69,7 +67,7 @@ class UltraLiteDatabase {
   /// Runs [action] inside a single explicit transaction.
   /// Commits on success; rolls back on any exception.
   Future<T> runInTransaction<T>(Future<T> Function() action) async {
-    beginTrans();
+    await beginTrans();
     try {
       final result = await action();
       await commit();

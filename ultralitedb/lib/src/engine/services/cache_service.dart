@@ -28,11 +28,12 @@ class CacheService {
 
   // ── Dirty tracking ────────────────────────────────────────────────────────
 
-  List<BasePage> getDirtyPages() =>
-      _pages.values.where((p) => p.isDirty).toList();
+  List<BasePage> getDirtyPages() => _pages.values.where((p) => p.isDirty).toList();
 
   void clearDirty() {
-    for (final p in _pages.values) p.isDirty = false;
+    for (final p in _pages.values) {
+      p.isDirty = false;
+    }
   }
 
   void clear() => _pages.clear();
@@ -49,6 +50,8 @@ class CacheService {
         if (_pages.length - remove.length <= maxSize) break;
       }
     }
-    for (final id in remove) _pages.remove(id);
+    for (final id in remove) {
+      _pages.remove(id);
+    }
   }
 }

@@ -55,16 +55,16 @@ class PageService {
 
   // ── Allocation ────────────────────────────────────────────────────────────
 
-  Future<T> newPage<T extends BasePage>(T Function(int pageID) factory, [BasePage? prevPage]) async {
+  Future<T> newPage<T extends BasePage>(T Function(int pageID) pageCallback, [BasePage? prevPage]) async {
     final T page;
 
     if (_header.freeEmptyPageId != PageAddress.emptyPageId) {
       final empty = await getPage<EmptyPage>(_header.freeEmptyPageId);
       _header.freeEmptyPageId = empty.nextPageID;
-      page = factory(empty.pageID);
+      page = pageCallback(empty.pageID);
     } else {
       _header.lastPageId++;
-      page = factory(_header.lastPageId);
+      page = pageCallback(_header.lastPageId);
       await _disk.setLength((_header.lastPageId + 1) * BasePage.pageSize);
     }
 

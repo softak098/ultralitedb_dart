@@ -38,6 +38,7 @@ Future<void> tArrayBulk() async {
   await col.ensureIndex("Color");
 
   final ps = <BsonDocument>[];
+  final tasks = <Future<List<BsonValue>>>[];
 
   for (var i = 0; i < 300000; i++) {
     var p = BsonDocument();
@@ -50,11 +51,16 @@ Future<void> tArrayBulk() async {
 
     ps.add(p);
 
-    if (i > 0 && i % 30000 == 0) {
-      await col.insertAll(ps);
-      ps.clear();
-    }
+    // if (i > 0 && i % 50000 == 0) {
+    //   //tasks.add(col.insertAll(ps));
+
+    //   await col.insertAll(ps);
+    //   ps.clear();
+    // }
   }
+
+  //tasks.add(col.insertAll(ps));
+  //await Future.wait(tasks);
 
   await col.insertAll(ps);
 
