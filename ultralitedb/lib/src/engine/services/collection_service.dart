@@ -1,3 +1,4 @@
+import 'dart:async';
 import '../pages/collection_page.dart';
 import '../pages/data_page.dart';
 import '../pages/extend_page.dart';
@@ -12,62 +13,112 @@ class CollectionService {
 
   CollectionService(this._pager, this._indexer);
 
-  // ── Access ────────────────────────────────────────────────────────────────
+  // ── Helper for chaining FutureOr operations ────────────────────────────────
 
-  Future<CollectionPage?> get(String name) async {
-    final pageId = _pager.header.getCollectionPageId(name);
-    return pageId == null ? null : await _pager.getPage<CollectionPage>(pageId);
+  FutureOr<R> _then<T, R>(FutureOr<T> value, FutureOr<R> Function(T) action) {
+    if (value is Future<T>) {
+      return value.then((v) => action(v));
+    }
+    return action(value);
   }
 
-  Future<CollectionPage> getOrCreate(String name) async => (await get(name)) ?? (await add(name));
+  // ── Access ────────────────────────────────────────────────────────────────
+
+  FutureOr<CollectionPage?> get(String name) {
+    final pageId = _pager.header.getCollectionPageId(name);
+    if (pageId == null) return null;
+    return _pager.getPage<CollectionPage>(pageId);
+  }
+
+  FutureOr<CollectionPage> getOrCreate(String name) {
+    return _then(get(name), (existing) {
+      if (existing != null) return existing;
+      return add(name);
+    });
+  }
 
   // ── DDL ───────────────────────────────────────────────────────────────────
 
-  Future<CollectionPage> add(String name) async {
-    final col = await _pager.newPage<CollectionPage>((id) => CollectionPage(id));
-
-    // Slot 0: primary key (_id) — always unique
-    await _indexer.createIndex(col, '_id', true);
-
-    _pager.header.addCollection(name, col.pageID);
-    _pager.setDirty(_pager.header);
-    return col;
+  FutureOr<CollectionPage> add(String name) {
+    return _then(_pager.newPage<CollectionPage>((id) => CollectionPage(id)), (col) {
+      // Slot 0: primary key (_id) — always unique
+      return _then(_indexer.createIndex(col, '_id', true), (_) {
+        _pager.header.addCollection(name, col.pageID);
+        _pager.setDirty(_pager.header);
+        return col;
+      });
+    });
   }
 
-  Future<void> drop(String name) async {
-    final col = await get(name);
-    if (col == null) return;
+  FutureOr<void> drop(String name) {
+    return _then(get(name), (col) {
+      if (col == null) return null;
 
-    // Drop all indexes (frees IndexPage chains)
-    for (final idx in col.indexes.where((i) => i.isNotEmpty)) {
-      await _indexer.dropIndex(idx);
+      // Drop all indexes (frees IndexPage chains)
+      return _dropAllIndexes(col.indexes.where((i) => i.isNotEmpty).toList(), 0, () {
+        // Free DataPage chain and any ExtendPage chains within them
+        return _then(_pager.getSeqPages<DataPage>(col.freeDataPageID), (dataPages) {
+          return _freeDataPages(dataPages.toList(), 0, () {
+            _pager.header.removeCollection(name);
+            _pager.setDirty(_pager.header);
+            _pager.freePage(col);
+            return null;
+          });
+        });
+      });
+    });
+  }
+
+  FutureOr<void> _dropAllIndexes(List<CollectionIndex> indexes, int index, FutureOr<void> Function() onComplete) {
+    if (index >= indexes.length) {
+      return onComplete();
     }
 
-    // Free DataPage chain and any ExtendPage chains within them
-    for (final dataPage in await _pager.getSeqPages<DataPage>(col.freeDataPageID)) {
-      for (final block in dataPage.dataBlocks.values) {
-        if (block.hasExtend) {
-          for (final extPage in await _pager.getSeqPages<ExtendPage>(block.extendPageID)) {
-            _pager.freePage(extPage);
-          }
-        }
-      }
+    return _then(_indexer.dropIndex(indexes[index]), (_) {
+      return _dropAllIndexes(indexes, index + 1, onComplete);
+    });
+  }
+
+  FutureOr<void> _freeDataPages(List<DataPage> dataPages, int index, FutureOr<void> Function() onComplete) {
+    if (index >= dataPages.length) {
+      return onComplete();
+    }
+
+    final dataPage = dataPages[index];
+    return _then(_freeExtendPages(dataPage.dataBlocks.values.toList(), 0), (_) {
       _pager.freePage(dataPage);
-    }
-
-    _pager.header.removeCollection(name);
-    _pager.setDirty(_pager.header);
-    _pager.freePage(col);
+      return _freeDataPages(dataPages, index + 1, onComplete);
+    });
   }
 
-  Future<void> rename(String oldName, String newName) async {
-    final col = await get(oldName);
-    if (col == null) throw StateError('Collection "$oldName" not found');
-    if ((await get(newName)) != null) {
-      throw StateError('Collection "$newName" already exists');
+  FutureOr<void> _freeExtendPages(List<DataBlock> blocks, int index) {
+    if (index >= blocks.length) {
+      return null;
     }
-    _pager.header.removeCollection(oldName);
-    _pager.header.addCollection(newName, col.pageID);
-    _pager.setDirty(_pager.header);
+
+    final block = blocks[index];
+    if (!block.hasExtend) {
+      return _freeExtendPages(blocks, index + 1);
+    }
+
+    return _then(_pager.getSeqPages<ExtendPage>(block.extendPageID), (extPages) {
+      for (final ext in extPages) {
+        _pager.freePage(ext);
+      }
+      return _freeExtendPages(blocks, index + 1);
+    });
+  }
+
+  FutureOr<void> rename(String oldName, String newName) {
+    return _then(get(oldName), (col) {
+      if (col == null) throw StateError('Collection "$oldName" not found');
+      return _then(get(newName), (existing) {
+        if (existing != null) throw StateError('Collection "$newName" already exists');
+        _pager.header.removeCollection(oldName);
+        _pager.header.addCollection(newName, col.pageID);
+        _pager.setDirty(_pager.header);
+        return null;
+      });
+    });
   }
 }

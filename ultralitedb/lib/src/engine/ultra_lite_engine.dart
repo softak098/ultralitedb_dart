@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -40,14 +41,26 @@ class UltraLiteEngine {
   bool _disposed = false;
   bool _userTransaction = false; // true while in explicit-transaction mode
 
+  // ── Helper for chaining FutureOr operations ────────────────────────────────
+
+  FutureOr<R> _then<T, R>(FutureOr<T> value, FutureOr<R> Function(T) action) {
+    if (value is Future<T>) {
+      return value.then((v) => action(v));
+    }
+    return action(value);
+  }
+
   // ── Factory constructors ──────────────────────────────────────────────────
 
-  static Future<UltraLiteEngine> file(String filename, {FileOptions? options, String? password}) async =>
-      await UltraLiteEngine._open(FileDiskService(filename, options: options), password: password);
+  static FutureOr<UltraLiteEngine> file(String filename, {FileOptions? options, String? password}) {
+    return _open(FileDiskService(filename, options: options), password: password);
+  }
 
-  static Future<UltraLiteEngine> memory() async => await UltraLiteEngine._open(StreamDiskService());
+  static FutureOr<UltraLiteEngine> memory() {
+    return _open(StreamDiskService());
+  }
 
-  static Future<UltraLiteEngine> _open(IDiskService disk, {String? password}) async {
+  static FutureOr<UltraLiteEngine> _open(IDiskService disk, {String? password}) {
     final cache = CacheService();
     final pager = PageService(disk, cache);
     final data = DataService(pager);
@@ -64,8 +77,7 @@ class UltraLiteEngine {
       trans: trans,
       colSvc: colSvc,
     );
-    await engine._initialize(password);
-    return engine;
+    return engine._then(engine._initialize(password), (_) => engine);
   }
 
   UltraLiteEngine._({
@@ -78,134 +90,219 @@ class UltraLiteEngine {
     required this._colSvc,
   });
 
-  Future<void> _initialize([String? password]) async {
-    await _pager.initialize(password);
-    _trans.begin(); // engine always starts with an open auto-transaction
+  FutureOr<void> _initialize([String? password]) {
+    return _then(_pager.initialize(password), (_) {
+      _trans.begin(); // engine always starts with an open auto-transaction
+    });
   }
 
   // ── Insert ────────────────────────────────────────────────────────────────
 
   /// Inserts [doc] into [collection]. Auto-generates `_id` if absent.
   /// Returns the `_id` value.
-  Future<BsonValue> insert(String collection, BsonDocument doc, [BsonAutoId autoId = BsonAutoId.objectId]) async {
+  FutureOr<BsonValue> insert(String collection, BsonDocument doc, [BsonAutoId autoId = BsonAutoId.objectId]) {
     _assertAlive();
-    final col = await _colSvc.getOrCreate(collection);
+    return _then(_colSvc.getOrCreate(collection), (col) {
+      if (!doc.containsKey('_id') || doc['_id'].isNull) {
+        return _then(_generateId(col, autoId), (id) {
+          doc['_id'] = id;
+          return _doInsert(col, doc);
+        });
+      }
+      return _doInsert(col, doc);
+    });
+  }
 
-    if (!doc.containsKey('_id') || doc['_id'].isNull) {
-      doc['_id'] = _generateId(col, autoId);
+  FutureOr<BsonValue> _doInsert(CollectionPage col, BsonDocument doc) {
+    return _then(_data.insert(col, doc), (block) {
+      return _then(_addNodes(col.indexes.where((i) => i.isNotEmpty).toList(), 0, doc, block.position), (_) {
+        return _then(_autoCommit(), (_) => doc['_id']);
+      });
+    });
+  }
+
+  FutureOr<void> _addNodes(List<CollectionIndex> indexes, int index, BsonDocument doc, PageAddress blockAddr) {
+    var i = index;
+    while (i < indexes.length) {
+      final idx = indexes[i];
+      final res = _indexer.addNode(idx, Query.getFieldValue(doc, idx.field), blockAddr);
+      if (res is Future<IndexNode>) {
+        return res.then((_) => _addNodes(indexes, i + 1, doc, blockAddr));
+      }
+      i++;
     }
-
-    final block = await _data.insert(col, doc);
-
-    for (final idx in col.indexes.where((i) => i.isNotEmpty)) {
-      await _indexer.addNode(idx, Query.getFieldValue(doc, idx.field), block.position);
-    }
-
-    await _autoCommit();
-    return doc['_id'];
+    return null;
   }
 
   /// Inserts all [docs] inside a single transaction.
   /// Returns the list of generated `_id` values.
-  Future<List<BsonValue>> insertBulk(
+  FutureOr<List<BsonValue>> insertBulk(
     String collection,
     Iterable<BsonDocument> docs, {
     BsonAutoId autoId = BsonAutoId.objectId,
-  }) async {
+  }) {
     _assertAlive();
+
+    final docsList = docs.toList();
 
     // If caller is already managing a transaction, just forward each insert.
     if (_userTransaction) {
-      final results = <BsonValue>[];
-      for (final doc in docs) {
-        results.add(await insert(collection, doc, autoId));
-      }
-      return results;
+      return _insertBulkLoop(collection, docsList, 0, autoId, []);
     }
 
     // Otherwise wrap in one explicit transaction.
     beginTrans();
-    try {
-      final results = <BsonValue>[];
-      for (final doc in docs) {
-        results.add(await insert(collection, doc, autoId));
-      }
-      await commit();
-      return results;
-    } catch (_) {
-      await rollback();
-      rethrow;
+    final res = _then(_insertBulkLoop(collection, docsList, 0, autoId, []), (results) {
+      return _then(commit(), (_) => results);
+    });
+
+    if (res is Future<List<BsonValue>>) {
+      return res.catchError((e) {
+        return _then(rollback(), (_) => throw e);
+      });
     }
+    return res;
+  }
+
+  FutureOr<List<BsonValue>> _insertBulkLoop(
+    String collection,
+    List<BsonDocument> docs,
+    int index,
+    BsonAutoId autoId,
+    List<BsonValue> results,
+  ) {
+    var i = index;
+    while (i < docs.length) {
+      final res = insert(collection, docs[i], autoId);
+      if (res is Future<BsonValue>) {
+        return res.then((id) {
+          results.add(id);
+          return _insertBulkLoop(collection, docs, i + 1, autoId, results);
+        });
+      }
+      results.add(res);
+      i++;
+    }
+    return results;
   }
 
   // ── Update ────────────────────────────────────────────────────────────────
 
   /// Updates the document identified by `doc['_id']`.
   /// Returns `true` if found and updated.
-  Future<bool> update(String collection, BsonDocument doc) async {
+  FutureOr<bool> update(String collection, BsonDocument doc) {
     _assertAlive();
-    final col = await _colSvc.get(collection);
-    if (col == null) return false;
+    return _then(_colSvc.get(collection), (col) {
+      if (col == null) return false;
 
-    final id = doc['_id'];
-    if (id.isNull) return false;
+      final id = doc['_id'];
+      if (id.isNull) return false;
 
-    final pkNode = await _findExact(col.pk, id);
-    if (pkNode == null) return false;
+      return _then(_findExact(col.pk, id), (pkNode) {
+        if (pkNode == null) return false;
 
-    final oldAddr = pkNode.dataBlock;
-    final block = await _data.update(col, oldAddr, doc);
+        final oldAddr = pkNode.dataBlock;
+        return _then(_data.update(col, oldAddr, doc), (block) {
+          // Rebuild non-pk index entries pointing to old data block
+          final otherIndexes = col.indexes.where((i) => i.isNotEmpty && !i.isPK).toList();
+          return _then(_rebuildOtherIndexes(otherIndexes, 0, oldAddr, doc, block.position), (_) {
+            // Update pk node's data pointer to new block location
+            pkNode.dataBlock = block.position;
+            _pager.setDirty(pkNode.page!);
 
-    // Rebuild non-pk index entries pointing to old data block
-    for (final idx in col.indexes.where((i) => i.isNotEmpty && !i.isPK)) {
-      final old = await _scanForBlock(idx, oldAddr);
-      if (old != null) await _indexer.deleteNode(old);
-      await _indexer.addNode(idx, Query.getFieldValue(doc, idx.field), block.position);
+            return _then(_autoCommit(), (_) => true);
+          });
+        });
+      });
+    });
+  }
+
+  FutureOr<void> _rebuildOtherIndexes(
+    List<CollectionIndex> indexes,
+    int index,
+    PageAddress oldAddr,
+    BsonDocument doc,
+    PageAddress newAddr,
+  ) {
+    var i = index;
+    while (i < indexes.length) {
+      final idx = indexes[i];
+      final res = _then(_scanForBlock(idx, oldAddr), (old) {
+        return _then(old != null ? _indexer.deleteNode(old) : null, (_) {
+          return _indexer.addNode(idx, Query.getFieldValue(doc, idx.field), newAddr);
+        });
+      });
+
+      if (res is Future) {
+        return (res as Future).then((_) => _rebuildOtherIndexes(indexes, i + 1, oldAddr, doc, newAddr));
+      }
+      i++;
     }
-
-    // Update pk node's data pointer to new block location
-    pkNode.dataBlock = block.position;
-    _pager.setDirty(pkNode.page!);
-
-    await _autoCommit();
-    return true;
+    return null;
   }
 
   // ── Delete ────────────────────────────────────────────────────────────────
 
   /// Deletes the document with [id]. Returns `true` if found and deleted.
-  Future<bool> delete(String collection, BsonValue id) async {
+  FutureOr<bool> delete(String collection, BsonValue id) {
     _assertAlive();
-    final col = await _colSvc.get(collection);
-    if (col == null) return false;
+    return _then(_colSvc.get(collection), (col) {
+      if (col == null) return false;
 
-    final pkNode = await _findExact(col.pk, id);
-    if (pkNode == null) return false;
+      return _then(_findExact(col.pk, id), (pkNode) {
+        if (pkNode == null) return false;
 
-    final addr = pkNode.dataBlock;
+        final addr = pkNode.dataBlock;
+        final indexes = col.indexes.where((i) => i.isNotEmpty).toList();
 
-    for (final idx in col.indexes.where((i) => i.isNotEmpty)) {
+        return _then(_deleteFromIndexes(indexes, 0, addr, pkNode), (_) {
+          return _then(_data.delete(col, addr), (_) {
+            return _then(_autoCommit(), (_) => true);
+          });
+        });
+      });
+    });
+  }
+
+  FutureOr<void> _deleteFromIndexes(List<CollectionIndex> indexes, int index, PageAddress addr, IndexNode pkNode) {
+    var i = index;
+    while (i < indexes.length) {
+      final idx = indexes[i];
+      FutureOr<void> res;
       if (idx.isPK) {
-        await _indexer.deleteNode(pkNode);
+        res = _indexer.deleteNode(pkNode);
       } else {
-        final n = await _scanForBlock(idx, addr);
-        if (n != null) await _indexer.deleteNode(n);
+        res = _then(_scanForBlock(idx, addr), (n) {
+          return n != null ? _indexer.deleteNode(n) : null;
+        });
       }
-    }
 
-    await _data.delete(col, addr);
-    await _autoCommit();
-    return true;
+      if (res is Future) {
+        return res.then((_) => _deleteFromIndexes(indexes, i + 1, addr, pkNode));
+      }
+      i++;
+    }
+    return null;
   }
 
   /// Deletes all documents matching [query]. Returns count deleted.
-  Future<int> deleteMany(String collection, Query query) async {
+  FutureOr<int> deleteMany(String collection, Query query) {
     _assertAlive();
     // Collect all ids first to avoid mutating the index during iteration.
-    final docs = await find(collection, query: query);
-    final ids = docs.map((d) => d['_id']).toList();
-    for (final id in ids) {
-      await delete(collection, id);
+    return _then(find(collection, query: query), (docs) {
+      final ids = docs.map((d) => d['_id']).toList();
+      return _deleteManyLoop(collection, ids, 0);
+    });
+  }
+
+  FutureOr<int> _deleteManyLoop(String collection, List<BsonValue> ids, int index) {
+    var i = index;
+    while (i < ids.length) {
+      final res = delete(collection, ids[i]);
+      if (res is Future<bool>) {
+        return res.then((_) => _deleteManyLoop(collection, ids, i + 1));
+      }
+      i++;
     }
     return ids.length;
   }
@@ -214,48 +311,51 @@ class UltraLiteEngine {
 
   /// Returns matching documents.
   /// Uses the best available index; falls back to a full _id-index scan.
-  Future<Iterable<BsonDocument>> find(
+  FutureOr<Iterable<BsonDocument>> find(
     String collection, {
     Query? query,
     int skip = 0,
     int limit = -1,
     int order = Query.ascending,
-  }) async {
+  }) {
     _assertAlive();
-    final col = await _colSvc.get(collection);
-    if (col == null) return const [];
-    return await _executeQuery(col, query ?? Query.all(), skip, limit, order);
+    return _then(_colSvc.get(collection), (col) {
+      if (col == null) return const [];
+      return _executeQuery(col, query ?? Query.all(), skip, limit, order);
+    });
   }
 
   /// Returns the document whose `_id` == [id], or `null`.
-  Future<BsonDocument?> findById(String collection, BsonValue id) async {
+  FutureOr<BsonDocument?> findById(String collection, BsonValue id) {
     _assertAlive();
-    final col = await _colSvc.get(collection);
-    if (col == null) return null;
-    final node = await _findExact(col.pk, id);
-    return node == null ? null : await _data.read(node.dataBlock);
+    return _then(_colSvc.get(collection), (col) {
+      if (col == null) return null;
+      return _then(_findExact(col.pk, id), (node) {
+        return node == null ? null : _data.read(node.dataBlock);
+      });
+    });
   }
 
   /// Returns the first document matching [query], or `null`.
-  Future<BsonDocument?> findOne(String collection, Query query) async {
-    final docs = await find(collection, query: query, limit: 1);
-    return docs.firstOrNull;
+  FutureOr<BsonDocument?> findOne(String collection, Query query) {
+    return _then(find(collection, query: query, limit: 1), (docs) {
+      return docs.firstOrNull;
+    });
   }
 
   /// Count of documents matching [query] (all documents if [query] is null).
-  Future<int> count(String collection, [Query? query]) async {
+  FutureOr<int> count(String collection, [Query? query]) {
     _assertAlive();
-    final col = await _colSvc.get(collection);
-    if (col == null) return 0;
-    if (query == null) return col.documentCount;
-    final docs = await find(collection, query: query);
-    return docs.length;
+    return _then(_colSvc.get(collection), (col) {
+      if (col == null) return 0;
+      if (query == null) return col.documentCount;
+      return _then(find(collection, query: query), (docs) => docs.length);
+    });
   }
 
   /// `true` if at least one document matches [query].
-  Future<bool> exists(String collection, Query query) async {
-    final docs = await find(collection, query: query, limit: 1);
-    return docs.isNotEmpty;
+  FutureOr<bool> exists(String collection, Query query) {
+    return _then(find(collection, query: query, limit: 1), (docs) => docs.isNotEmpty);
   }
 
   // ── Index DDL ─────────────────────────────────────────────────────────────
@@ -263,51 +363,71 @@ class UltraLiteEngine {
   /// Creates an index on [field] if it does not already exist.
   /// Back-fills the index from existing documents.
   /// Returns `true` if created, `false` if it already existed.
-  Future<bool> ensureIndex(String collection, String field, {bool unique = false}) async {
+  FutureOr<bool> ensureIndex(String collection, String field, {bool unique = false}) {
     _assertAlive();
-    final col = await _colSvc.getOrCreate(collection);
-    if (col.getIndex(field) != null) return false;
+    return _then(_colSvc.getOrCreate(collection), (col) {
+      if (col.getIndex(field) != null) return false;
 
-    final idx = await _indexer.createIndex(col, field, unique);
+      return _then(_indexer.createIndex(col, field, unique), (idx) {
+        return _then(_indexer.findAll(col.pk, Query.ascending), (pkNodes) {
+          return _then(_backfillIndexLoop(idx, field, pkNodes.toList(), 0), (_) {
+            return _then(_autoCommit(), (_) => true);
+          });
+        });
+      });
+    });
+  }
 
-    for (final node in await _indexer.findAll(col.pk, Query.ascending)) {
-      final doc = await _data.read(node.dataBlock);
-      await _indexer.addNode(idx, Query.getFieldValue(doc, field), node.dataBlock);
+  FutureOr<void> _backfillIndexLoop(CollectionIndex idx, String field, List<IndexNode> pkNodes, int index) {
+    var i = index;
+    while (i < pkNodes.length) {
+      final node = pkNodes[i];
+      final res = _then(_data.read(node.dataBlock), (doc) {
+        return _indexer.addNode(idx, Query.getFieldValue(doc, field), node.dataBlock);
+      });
+
+      if (res is Future) {
+        return (res as Future).then((_) => _backfillIndexLoop(idx, field, pkNodes, i + 1));
+      }
+      i++;
     }
-
-    await _autoCommit();
-    return true;
+    return null;
   }
 
   /// Drops the index for [field]. Returns `true` if it existed.
-  Future<bool> dropIndex(String collection, String field) async {
+  FutureOr<bool> dropIndex(String collection, String field) {
     _assertAlive();
     if (field == '_id') throw ArgumentError('Cannot drop the _id index');
-    final col = await _colSvc.get(collection);
-    if (col == null) return false;
-    final idx = col.getIndex(field);
-    if (idx == null) return false;
-    await _indexer.dropIndex(idx);
-    await _autoCommit();
-    return true;
+    return _then(_colSvc.get(collection), (col) {
+      if (col == null) return false;
+      final idx = col.getIndex(field);
+      if (idx == null) return false;
+      return _then(_indexer.dropIndex(idx), (_) {
+        return _then(_autoCommit(), (_) => true);
+      });
+    });
   }
 
   // ── Collection DDL ────────────────────────────────────────────────────────
 
-  Future<bool> dropCollection(String collection) async {
+  FutureOr<bool> dropCollection(String collection) {
     _assertAlive();
-    if ((await _colSvc.get(collection)) == null) return false;
-    await _colSvc.drop(collection);
-    await _autoCommit();
-    return true;
+    return _then(_colSvc.get(collection), (col) {
+      if (col == null) return false;
+      return _then(_colSvc.drop(collection), (_) {
+        return _then(_autoCommit(), (_) => true);
+      });
+    });
   }
 
-  Future<bool> renameCollection(String oldName, String newName) async {
+  FutureOr<bool> renameCollection(String oldName, String newName) {
     _assertAlive();
-    if ((await _colSvc.get(oldName)) == null) return false;
-    await _colSvc.rename(oldName, newName);
-    await _autoCommit();
-    return true;
+    return _then(_colSvc.get(oldName), (col) {
+      if (col == null) return false;
+      return _then(_colSvc.rename(oldName, newName), (_) {
+        return _then(_autoCommit(), (_) => true);
+      });
+    });
   }
 
   List<String> getCollectionNames() => _pager.header.collections.keys.toList();
@@ -316,44 +436,55 @@ class UltraLiteEngine {
 
   /// Switches to explicit-transaction mode.
   /// Returns `false` if already in explicit-transaction mode.
-  Future<bool> beginTrans() async {
+  FutureOr<bool> beginTrans() {
     if (_userTransaction) return false;
-    if (_trans.isActive) await _trans.commit(); // flush pending auto-tx
+    if (_trans.isActive) {
+      return _then(_trans.commit(), (_) {
+        _trans.begin();
+        _userTransaction = true;
+        return true;
+      });
+    }
     _trans.begin();
     _userTransaction = true;
     return true;
   }
 
   /// Commits the explicit transaction. Returns `false` if not in one.
-  Future<bool> commit() async {
+  FutureOr<bool> commit() {
     if (!_userTransaction) return false;
-    await _trans.commit();
-    _userTransaction = false;
-    _trans.begin(); // restart auto-tx
-    return true;
+    return _then(_trans.commit(), (_) {
+      _userTransaction = false;
+      _trans.begin(); // restart auto-tx
+      return true;
+    });
   }
 
   /// Rolls back the explicit transaction. Returns `false` if not in one.
-  Future<bool> rollback() async {
+  FutureOr<bool> rollback() {
     if (!_userTransaction) return false;
-    await _trans.rollback();
-    _userTransaction = false;
-    _trans.begin();
-    return true;
+    return _then(_trans.rollback(), (_) {
+      _userTransaction = false;
+      _trans.begin();
+      return true;
+    });
   }
 
   /// Commit + begin a new transaction (auto-mode only; no-op in explicit mode).
-  Future<void> checkpoint() async {
-    if (!_userTransaction) await _trans.checkpoint();
+  FutureOr<void> checkpoint() {
+    if (!_userTransaction) return _trans.checkpoint();
+    return null;
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-  Future<void> dispose() async {
-    if (_disposed) return;
-    if (_trans.isActive) await _trans.commit();
-    await _disk.dispose();
-    _disposed = true;
+  FutureOr<void> dispose() {
+    if (_disposed) return null;
+    return _then(_trans.isActive ? _trans.commit() : null, (_) {
+      return _then(_disk.dispose(), (_) {
+        _disposed = true;
+      });
+    });
   }
 
   // ── Private — transaction helpers ─────────────────────────────────────────
@@ -362,16 +493,18 @@ class UltraLiteEngine {
     if (_disposed) throw StateError('UltraLiteEngine has been disposed');
   }
 
-  Future<void> _autoCommit() async {
+  FutureOr<void> _autoCommit() {
     if (!_userTransaction) {
-      await _trans.commit();
-      _trans.begin();
+      return _then(_trans.commit(), (_) {
+        _trans.begin();
+      });
     }
+    return null;
   }
 
   // ── Private — query execution ─────────────────────────────────────────────
 
-  Future<Iterable<BsonDocument>> _executeQuery(CollectionPage col, Query query, int skip, int limit, int order) async {
+  FutureOr<Iterable<BsonDocument>> _executeQuery(CollectionPage col, Query query, int skip, int limit, int order) {
     // Choose the best index for this query.
     // Logical queries (And/Or/Not) have field == '' → always fall back to pk.
     final useIdx = query is QueryAll ? col.pk : (col.getIndex(query.field) ?? col.pk);
@@ -380,54 +513,113 @@ class UltraLiteEngine {
     final indexed = query is! QueryAll && useIdx.field == query.field;
 
     // Determine starting PageAddress
-    PageAddress startAddr;
-    if (order == Query.ascending && indexed) {
-      startAddr = await _seekStart(useIdx, query); // binary-search to lower bound
-    } else if (order == Query.ascending) {
-      startAddr = useIdx.head;
-    } else {
-      startAddr = useIdx.tail;
-    }
+    return _then(
+      indexed && order == Query.ascending ? _seekStart(useIdx, query) : (order == Query.ascending ? useIdx.head : useIdx.tail),
+      (startAddr) {
+        return _then(_indexer.getNode(startAddr), (startNode) {
+          final initialAddr = order == Query.ascending ? startNode.next[0] : startNode.prev[0];
+          return _scanQueryNodes(initialAddr, query, indexed, order, skip, limit, 0, 0, []);
+        });
+      },
+    );
+  }
 
-    var addr = order == Query.ascending
-        ? (await _indexer.getNode(startAddr)).next[0]
-        : (await _indexer.getNode(startAddr)).prev[0];
+  FutureOr<List<BsonDocument>> _scanQueryNodes(
+    PageAddress addr,
+    Query query,
+    bool indexed,
+    int order,
+    int skip,
+    int limit,
+    int skipped,
+    int yielded,
+    List<BsonDocument> results,
+  ) {
+    var curAddr = addr;
+    var curSkipped = skipped;
+    var curYielded = yielded;
 
-    int skipped = 0;
-    int yielded = 0;
-    final results = <BsonDocument>[];
-
-    while (!addr.isEmpty) {
-      final node = await _indexer.getNode(addr);
-
-      // Sentinel guard — stop at head / tail
-      if (node.key.isMinValue || node.key.isMaxValue) break;
-
-      // Early termination: skip nodes that are provably past the upper bound
-      if (order == Query.ascending && indexed && _isPastUpperBound(query, node.key)) {
-        break;
+    while (!curAddr.isEmpty) {
+      final nodeRes = _indexer.getNode(curAddr);
+      if (nodeRes is Future<IndexNode>) {
+        return nodeRes.then(
+          (node) => _handleQueryNode(node, curAddr, query, indexed, order, skip, limit, curSkipped, curYielded, results),
+        );
       }
 
-      final doc = await _data.read(node.dataBlock);
+      final node = nodeRes;
+      if (node.key.isMinValue || node.key.isMaxValue) return results;
+      if (order == Query.ascending && indexed && _isPastUpperBound(query, node.key)) return results;
 
+      final docRes = _data.read(node.dataBlock);
+      if (docRes is Future<BsonDocument>) {
+        return docRes.then((doc) {
+          if (query.filterDocument(doc)) {
+            if (curSkipped < skip) {
+              curSkipped++;
+            } else {
+              results.add(doc);
+              curYielded++;
+              if (limit > 0 && curYielded >= limit) return results;
+            }
+          }
+          final nextAddr = order == Query.ascending ? node.next[0] : node.prev[0];
+          return _scanQueryNodes(nextAddr, query, indexed, order, skip, limit, curSkipped, curYielded, results);
+        });
+      }
+
+      final doc = docRes;
       if (query.filterDocument(doc)) {
-        if (skipped < skip) {
-          skipped++;
+        if (curSkipped < skip) {
+          curSkipped++;
         } else {
           results.add(doc);
-          if (limit > 0 && ++yielded >= limit) break;
+          curYielded++;
+          if (limit > 0 && curYielded >= limit) return results;
+        }
+      }
+      curAddr = order == Query.ascending ? node.next[0] : node.prev[0];
+    }
+    return results;
+  }
+
+  FutureOr<List<BsonDocument>> _handleQueryNode(
+    IndexNode node,
+    PageAddress addr,
+    Query query,
+    bool indexed,
+    int order,
+    int skip,
+    int limit,
+    int skipped,
+    int yielded,
+    List<BsonDocument> results,
+  ) {
+    if (node.key.isMinValue || node.key.isMaxValue) return results;
+    if (order == Query.ascending && indexed && _isPastUpperBound(query, node.key)) return results;
+
+    return _then(_data.read(node.dataBlock), (doc) {
+      var nextSkipped = skipped;
+      var nextYielded = yielded;
+
+      if (query.filterDocument(doc)) {
+        if (nextSkipped < skip) {
+          nextSkipped++;
+        } else {
+          results.add(doc);
+          nextYielded++;
+          if (limit > 0 && nextYielded >= limit) return results;
         }
       }
 
-      addr = order == Query.ascending ? node.next[0] : node.prev[0];
-    }
-
-    return results;
+      final nextAddr = order == Query.ascending ? node.next[0] : node.prev[0];
+      return _scanQueryNodes(nextAddr, query, indexed, order, skip, limit, nextSkipped, nextYielded, results);
+    });
   }
 
   /// Returns the position of the predecessor node (last node whose key < lower
   /// bound of [query]), so the caller can advance to the first candidate.
-  Future<PageAddress> _seekStart(CollectionIndex idx, Query query) async {
+  FutureOr<PageAddress> _seekStart(CollectionIndex idx, Query query) {
     final BsonValue? lowerBound = switch (query) {
       QueryEquals q => q.value,
       QueryGreater q => q.value,
@@ -435,7 +627,7 @@ class UltraLiteEngine {
       _ => null,
     };
     if (lowerBound == null) return idx.head;
-    return (await _indexer.find(idx, lowerBound, sibling: false)).position;
+    return _then(_indexer.find(idx, lowerBound, sibling: false), (node) => node.position);
   }
 
   /// `true` when [key] is provably past the upper bound of [query].
@@ -449,50 +641,44 @@ class UltraLiteEngine {
   // ── Private — index helpers ───────────────────────────────────────────────
 
   /// Binary-search exact match in a skip-list index.
-  Future<IndexNode?> _findExact(CollectionIndex idx, BsonValue value) async {
-    final pred = await _indexer.find(idx, value, sibling: false);
-    if (pred.next[0].isEmpty) return null;
-    final candidate = await _indexer.getNode(pred.next[0]);
-    if (candidate.key.isMaxValue) return null;
-    return candidate.key == value ? candidate : null;
+  FutureOr<IndexNode?> _findExact(CollectionIndex idx, BsonValue value) {
+    return _then(_indexer.find(idx, value, sibling: false), (pred) {
+      if (pred.next[0].isEmpty) return null;
+      return _then(_indexer.getNode(pred.next[0]), (candidate) {
+        if (candidate.key.isMaxValue) return null;
+        return candidate.key == value ? candidate : null;
+      });
+    });
   }
 
   /// Scan an index for a node pointing to [block].
-  Future<IndexNode?> _scanForBlock(CollectionIndex idx, PageAddress block) async {
-    for (final node in await _indexer.findAll(idx, Query.ascending)) {
-      if (node.dataBlock == block) return node;
-    }
-    return null;
+  FutureOr<IndexNode?> _scanForBlock(CollectionIndex idx, PageAddress block) {
+    return _then(_indexer.findAll(idx, Query.ascending), (nodes) {
+      for (final node in nodes) {
+        if (node.dataBlock == block) return node;
+      }
+      return null;
+    });
   }
-
-  //   /// Level-0 linear scan to find the node pointing at [addr].
-  //   IndexNode? _scanForBlock(CollectionIndex idx, PageAddress addr) {
-  //     var cur = _indexer.getNode(idx.head).next[0];
-  //     while (!cur.isEmpty) {
-  //       final node = _indexer.getNode(cur);
-  //       if (node.key.isMaxValue) break;
-  //       if (node.dataBlock == addr) return node;
-  //       cur = node.next[0];
-  //     }
-  //     return null;
-  //   }
 
   // ── Private — id generation ───────────────────────────────────────────────
 
-  Future<BsonValue> _generateId(CollectionPage col, BsonAutoId autoId) async => switch (autoId) {
+  FutureOr<BsonValue> _generateId(CollectionPage col, BsonAutoId autoId) => switch (autoId) {
     BsonAutoId.objectId => BsonValue.fromObjectId(ObjectId.newObjectId()),
     BsonAutoId.guid => BsonValue.fromBytes(Uint8List.fromList(List.generate(16, (_) => Random.secure().nextInt(256)))),
-    BsonAutoId.int32 => BsonValue.fromInt(await _nextIntId(col)),
-    BsonAutoId.int64 => BsonValue.fromInt64(await _nextIntId(col)),
+    BsonAutoId.int32 => _then(_nextIntId(col), (id) => BsonValue.fromInt(id)),
+    BsonAutoId.int64 => _then(_nextIntId(col), (id) => BsonValue.fromInt64(id)),
   };
 
   /// Max existing int id + 1 (walks back from tail sentinel).
-  Future<int> _nextIntId(CollectionPage col) async {
-    final tail = await _indexer.getNode(col.pk.tail);
-    final prev = tail.prev[0];
-    if (prev.isEmpty) return 1;
-    final last = await _indexer.getNode(prev);
-    if (last.key.isMinValue) return 1;
-    return (last.key.asInt64 ?? last.key.asInt32 ?? 0) + 1;
+  FutureOr<int> _nextIntId(CollectionPage col) {
+    return _then(_indexer.getNode(col.pk.tail), (tail) {
+      final prev = tail.prev[0];
+      if (prev.isEmpty) return 1;
+      return _then(_indexer.getNode(prev), (last) {
+        if (last.key.isMinValue) return 1;
+        return (last.key.asInt64 ?? last.key.asInt32 ?? 0) + 1;
+      });
+    });
   }
 }

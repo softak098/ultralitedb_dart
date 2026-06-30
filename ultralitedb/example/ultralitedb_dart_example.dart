@@ -17,7 +17,7 @@ Future<void> main() async {
 
 Future<void> tArrayBulk() async {
   // Open database (or create if doesn't exist)
-  var db = await UltraLiteDatabase.file("products_bulk.db");
+  var db = await UltraLiteDatabase.file("products_bulk.db", options: FileOptions(syncIO: true));
 
   // Get a collection
   var col = db.getCollection("product_colored");
@@ -35,10 +35,9 @@ Future<void> tArrayBulk() async {
   //  return;
 
   //   await col.ensureIndex("Price");
-  await col.ensureIndex("Color");
+  col.ensureIndex("Color");
 
   final ps = <BsonDocument>[];
-  final tasks = <Future<List<BsonValue>>>[];
 
   for (var i = 0; i < 300000; i++) {
     var p = BsonDocument();
@@ -51,20 +50,20 @@ Future<void> tArrayBulk() async {
 
     ps.add(p);
 
-    // if (i > 0 && i % 50000 == 0) {
-    //   //tasks.add(col.insertAll(ps));
+    if (i > 0 && i % 50000 == 0) {
+      //tasks.add(col.insertAll(ps));
 
-    //   await col.insertAll(ps);
-    //   ps.clear();
-    // }
+      col.insertAll(ps);
+      ps.clear();
+    }
   }
 
   //tasks.add(col.insertAll(ps));
   //await Future.wait(tasks);
 
-  await col.insertAll(ps);
+  col.insertAll(ps);
 
-  await db.dispose();
+  db.dispose();
 }
 
 Future<void> t1Bulk() async {
@@ -77,8 +76,6 @@ Future<void> t1Bulk() async {
   final c = await col.count(Query.between("Price", BsonValue.fromInt(100), BsonValue.fromInt(200)));
 
   print(c);
-
-  return;
 
   await col.ensureIndex("Price");
 

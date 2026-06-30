@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -16,8 +17,8 @@ class StreamDiskService implements IDiskService {
   final Map<int, Uint8List> _pages = {};
 
   @override
-  Future<void> initialize([String? password]) async {
-    if (_pages.isNotEmpty) return; // already initialized
+  FutureOr<void> initialize([String? password]) {
+    if (_pages.isNotEmpty) return null; // already initialized
 
     // Page 0: HeaderPage
     final header = HeaderPage(0)
@@ -32,21 +33,21 @@ class StreamDiskService implements IDiskService {
   // ── Page I/O ──────────────────────────────────────────────────────────────
 
   @override
-  Future<Uint8List> readPage(int pageID) async =>
+  Uint8List readPage(int pageID) =>
       // Return a copy so callers can't accidentally mutate the store
       Uint8List.fromList(_pages[pageID] ?? Uint8List(BasePage.pageSize));
 
   @override
-  Future<void> writePage(int pageID, Uint8List buffer) async => _pages[pageID] = Uint8List.fromList(buffer);
+  void writePage(int pageID, Uint8List buffer) => _pages[pageID] = Uint8List.fromList(buffer);
 
   @override
-  Future<void> setLength(int fileSize) async {
+  void setLength(int fileSize) {
     final maxPageID = fileSize ~/ BasePage.pageSize;
     _pages.removeWhere((id, _) => id >= maxPageID);
   }
 
   @override
-  Future<int> getFileLength() async {
+  int getFileLength() {
     if (_pages.isEmpty) return 0;
     return (_pages.keys.reduce(math.max) + 1) * BasePage.pageSize;
   }
@@ -57,17 +58,17 @@ class StreamDiskService implements IDiskService {
   bool get isJournalEnabled => false;
 
   @override
-  Future<void> writeJournal(List<Uint8List> pages, int lastPageID) async {}
+  void writeJournal(List<Uint8List> pages, int lastPageID) {}
 
   @override
-  Future<Iterable<Uint8List>> readJournal(int lastPageID) async => const [];
+  Iterable<Uint8List> readJournal(int lastPageID) => const [];
 
   @override
-  Future<void> clearJournal(int lastPageID) async {}
+  void clearJournal(int lastPageID) {}
 
   @override
-  Future<void> flush() async {} // in-memory — nothing to flush
+  void flush() {} // in-memory — nothing to flush
 
   @override
-  Future<void> dispose() async => _pages.clear();
+  void dispose() => _pages.clear();
 }

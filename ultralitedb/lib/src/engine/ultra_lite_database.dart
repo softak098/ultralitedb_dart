@@ -1,3 +1,4 @@
+import 'dart:async';
 import '../bson/bson_auto_id.dart';
 import '../bson/bson_mapper.dart';
 import '../bson/bson_value.dart';
@@ -23,16 +24,27 @@ class UltraLiteDatabase {
   /// The [BsonMapper] used by all collections created through this database.
   final BsonMapper mapper;
 
-  // ── Factories ─────────────────────────────────────────────────────────────
+  // ── Helper for chaining FutureOr operations ────────────────────────────────
 
-  static Future<UltraLiteDatabase> file(String filename, {FileOptions? options, String? password, BsonMapper? mapper}) async {
-    final engine = await UltraLiteEngine.file(filename, options: options, password: password);
-    return UltraLiteDatabase._(engine, mapper: mapper);
+  static FutureOr<R> _then<T, R>(FutureOr<T> value, FutureOr<R> Function(T) action) {
+    if (value is Future<T>) {
+      return value.then((v) => action(v));
+    }
+    return action(value);
   }
 
-  static Future<UltraLiteDatabase> memory({BsonMapper? mapper}) async {
-    final engine = await UltraLiteEngine.memory();
-    return UltraLiteDatabase._(engine, mapper: mapper);
+  // ── Factories ─────────────────────────────────────────────────────────────
+
+  static FutureOr<UltraLiteDatabase> file(String filename, {FileOptions? options, String? password, BsonMapper? mapper}) {
+    return _then(UltraLiteEngine.file(filename, options: options, password: password), (engine) {
+      return UltraLiteDatabase._(engine, mapper: mapper);
+    });
+  }
+
+  static FutureOr<UltraLiteDatabase> memory({BsonMapper? mapper}) {
+    return _then(UltraLiteEngine.memory(), (engine) {
+      return UltraLiteDatabase._(engine, mapper: mapper);
+    });
   }
 
   UltraLiteDatabase._(UltraLiteEngine engine, {BsonMapper? mapper}) : _engine = engine, mapper = mapper ?? BsonMapper.global;
@@ -54,31 +66,35 @@ class UltraLiteDatabase {
 
   bool collectionExists(String name) => _engine.getCollectionNames().contains(name);
 
-  Future<bool> dropCollection(String name) => _engine.dropCollection(name);
+  FutureOr<bool> dropCollection(String name) => _engine.dropCollection(name);
 
-  Future<bool> renameCollection(String oldName, String newName) => _engine.renameCollection(oldName, newName);
+  FutureOr<bool> renameCollection(String oldName, String newName) => _engine.renameCollection(oldName, newName);
 
   // ── Transactions ──────────────────────────────────────────────────────────
 
-  Future<bool> beginTrans() => _engine.beginTrans();
-  Future<bool> commit() => _engine.commit();
-  Future<void> rollback() => _engine.rollback();
+  FutureOr<bool> beginTrans() => _engine.beginTrans();
+  FutureOr<bool> commit() => _engine.commit();
+  FutureOr<void> rollback() => _engine.rollback();
 
   /// Runs [action] inside a single explicit transaction.
   /// Commits on success; rolls back on any exception.
-  Future<T> runInTransaction<T>(Future<T> Function() action) async {
-    await beginTrans();
-    try {
-      final result = await action();
-      await commit();
-      return result;
-    } catch (_) {
-      await rollback();
-      rethrow;
-    }
+  FutureOr<T> runInTransaction<T>(FutureOr<T> Function() action) {
+    return _then(beginTrans(), (_) {
+      final res = action();
+      final finalRes = _then(res, (val) {
+        return _then(commit(), (_) => val);
+      });
+
+      if (finalRes is Future<T>) {
+        return finalRes.catchError((e) {
+          return _then(rollback(), (_) => throw e);
+        });
+      }
+      return finalRes;
+    });
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-  Future<void> dispose() => _engine.dispose();
+  FutureOr<void> dispose() => _engine.dispose();
 }

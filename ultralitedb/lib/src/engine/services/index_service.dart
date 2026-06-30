@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 import '../../bson/bson_value.dart';
 import '../pages/collection_page.dart';
@@ -14,9 +15,18 @@ class IndexService {
 
   IndexService(this._pager);
 
+  // ── Helper for chaining FutureOr operations ────────────────────────────────
+
+  FutureOr<R> _then<T, R>(FutureOr<T> value, FutureOr<R> Function(T) action) {
+    if (value is Future<T>) {
+      return value.then((v) => action(v));
+    }
+    return action(value);
+  }
+
   // ── Index DDL ─────────────────────────────────────────────────────────────
 
-  Future<CollectionIndex> createIndex(CollectionPage col, String field, bool unique) async {
+  FutureOr<CollectionIndex> createIndex(CollectionPage col, String field, bool unique) {
     final idx = col.getFreeIndex();
     if (idx == null) throw StateError('Max index count reached for collection');
 
@@ -24,160 +34,283 @@ class IndexService {
     idx.unique = unique;
 
     // Create head (MinValue) and tail (MaxValue) sentinel nodes
-    final head = await _allocateNode(idx, BsonValue.minValue, PageAddress.empty, IndexPage.maxLevels);
-    final tail = await _allocateNode(idx, BsonValue.maxValue, PageAddress.empty, IndexPage.maxLevels);
+    return _then(_allocateNode(idx, BsonValue.minValue, PageAddress.empty, IndexPage.maxLevels), (head) {
+      return _then(_allocateNode(idx, BsonValue.maxValue, PageAddress.empty, IndexPage.maxLevels), (tail) {
+        // Link sentinels: head ↔ tail at every level
+        for (var i = 0; i < IndexPage.maxLevels; i++) {
+          head.next[i] = tail.position;
+          tail.prev[i] = head.position;
+        }
+        _pager.setDirty(head.page!);
+        _pager.setDirty(tail.page!);
 
-    // Link sentinels: head ↔ tail at every level
-    for (var i = 0; i < IndexPage.maxLevels; i++) {
-      head.next[i] = tail.position;
-      tail.prev[i] = head.position;
-    }
-    _pager.setDirty(head.page!);
-    _pager.setDirty(tail.page!);
-
-    idx.head = head.position;
-    idx.tail = tail.position;
-    _pager.setDirty(col);
-    return idx;
+        idx.head = head.position;
+        idx.tail = tail.position;
+        _pager.setDirty(col);
+        return idx;
+      });
+    });
   }
 
-  Future<void> dropIndex(CollectionIndex index) async {
-    // Free every IndexPage in the index's page chain
-    var pageId = index.freeIndexPageID;
-    while (pageId != PageAddress.emptyPageId) {
-      final page = await _pager.getPage<IndexPage>(pageId);
+  FutureOr<void> dropIndex(CollectionIndex index) {
+    return _then(_dropIndexRecursive(index.freeIndexPageID), (_) {
+      index.field = '';
+      index.unique = false;
+      index.head = PageAddress.empty;
+      index.tail = PageAddress.empty;
+      index.freeIndexPageID = PageAddress.emptyPageId;
+      if (index.page != null) _pager.setDirty(index.page!);
+      return null;
+    });
+  }
+
+  FutureOr<void> _dropIndexRecursive(int pageId) {
+    if (pageId == PageAddress.emptyPageId) {
+      return null;
+    }
+
+    return _then(_pager.getPage<IndexPage>(pageId), (page) {
       final nextId = page.nextPageID;
       _pager.freePage(page);
-      pageId = nextId;
-    }
-    index.field = '';
-    index.unique = false;
-    index.head = PageAddress.empty;
-    index.tail = PageAddress.empty;
-    index.freeIndexPageID = PageAddress.emptyPageId;
-    if (index.page != null) _pager.setDirty(index.page!);
+      return _dropIndexRecursive(nextId);
+    });
   }
 
   // ── Node DML ──────────────────────────────────────────────────────────────
 
   /// Inserts a new skip-list node for [key] pointing to [dataBlock].
-  Future<IndexNode> addNode(CollectionIndex index, BsonValue key, PageAddress dataBlock) async {
+  FutureOr<IndexNode> addNode(CollectionIndex index, BsonValue key, PageAddress dataBlock) {
     final height = _randomHeight();
-    final update = <IndexNode>[];
 
     // Walk from head, finding the insertion predecessor at each level
-    var node = await getNode(index.head);
-    for (var i = IndexPage.maxLevels - 1; i >= 0; i--) {
-      while (i < node.next.length && !node.next[i].isEmpty) {
-        final nx = await getNode(node.next[i]);
-        if (nx.key >= key) break;
-        node = nx;
-      }
-      update.add(node); // update is filled in reverse order
-    }
-    update.setRange(0, update.length, update.reversed.toList());
-    // update[i] = last node at level i whose key < key
-
-    // Unique constraint check at level 0
-    if (index.unique && !key.isMinValue && !key.isMaxValue) {
-      if (!update[0].next[0].isEmpty) {
-        final candidate = await getNode(update[0].next[0]);
-        if (candidate.key == key) {
-          throw StateError('Unique index "${index.field}" violation: duplicate key $key');
+    return _then(getNode(index.head), (headNode) {
+      return _then(_walkLevelsForInsert(headNode, key, height, IndexPage.maxLevels - 1, []), (updateList) {
+        // Unique constraint check at level 0
+        if (index.unique && !key.isMinValue && !key.isMaxValue) {
+          if (!updateList[0].next[0].isEmpty) {
+            return _then(getNode(updateList[0].next[0]), (candidate) {
+              if (candidate.key == key) {
+                throw StateError('Unique index "${index.field}" violation: duplicate key $key');
+              }
+              return _allocateAndInsertNode(index, key, dataBlock, height, updateList);
+            });
+          }
         }
-      }
+        return _allocateAndInsertNode(index, key, dataBlock, height, updateList);
+      });
+    });
+  }
+
+  FutureOr<List<IndexNode>> _walkLevelsForInsert(IndexNode node, BsonValue key, int height, int level, List<IndexNode> update) {
+    if (level < 0) {
+      return update; // update list is built from level max down to 0
     }
 
-    final newNode = await _allocateNode(index, key, dataBlock, height);
+    return _then(_walkLevelForInsert(node, key, level), (pred) {
+      update.add(pred);
+      return _walkLevelsForInsert(pred, key, height, level - 1, update);
+    });
+  }
 
-    // Splice newNode into the skip-list at each level
-    for (var i = 0; i < height; i++) {
-      final pred = update[i];
-      final oldNext = i < pred.next.length ? pred.next[i] : PageAddress.empty;
+  FutureOr<IndexNode> _walkLevelForInsert(IndexNode node, BsonValue key, int level) {
+    if (level >= node.next.length || node.next[level].isEmpty) {
+      return node;
+    }
 
-      newNode.next[i] = oldNext;
-      newNode.prev[i] = pred.position;
+    return _then(getNode(node.next[level]), (nx) {
+      if (nx.key >= key) {
+        return node;
+      }
+      return _walkLevelForInsert(nx, key, level);
+    });
+  }
 
-      if (!oldNext.isEmpty) {
-        final oldNextNode = await getNode(oldNext);
-        if (i < oldNextNode.prev.length) {
-          oldNextNode.prev[i] = newNode.position;
-          _pager.setDirty(oldNextNode.page!);
+  FutureOr<IndexNode> _allocateAndInsertNode(
+    CollectionIndex index,
+    BsonValue key,
+    PageAddress dataBlock,
+    int height,
+    List<IndexNode> update,
+  ) {
+    // Reverse update list because it was built from IndexPage.maxLevels-1 down to 0,
+    // but we want update[i] to be the insertion predecessor at level i.
+    final reversedUpdate = update.reversed.toList();
+
+    return _then(_allocateNode(index, key, dataBlock, height), (newNode) {
+      return _then(_spliceNodeAtLevel(newNode, reversedUpdate, 0), (_) => newNode);
+    });
+  }
+
+  FutureOr<void> _spliceNodeAtLevel(IndexNode newNode, List<IndexNode> update, int level) {
+    if (level >= newNode.levels) {
+      return null;
+    }
+
+    final pred = update[level];
+    final oldNext = level < pred.next.length ? pred.next[level] : PageAddress.empty;
+
+    newNode.next[level] = oldNext;
+    newNode.prev[level] = pred.position;
+
+    return _then(
+      oldNext.isEmpty
+          ? null
+          : _then(getNode(oldNext), (oldNextNode) {
+              if (level < oldNextNode.prev.length) {
+                oldNextNode.prev[level] = newNode.position;
+                _pager.setDirty(oldNextNode.page!);
+              }
+              return null;
+            }),
+      (_) {
+        if (level < pred.next.length) {
+          pred.next[level] = newNode.position;
+          _pager.setDirty(pred.page!);
         }
-      }
-
-      if (i < pred.next.length) {
-        pred.next[i] = newNode.position;
-        _pager.setDirty(pred.page!);
-      }
-    }
-
-    _pager.setDirty(newNode.page!);
-    return newNode;
+        _pager.setDirty(newNode.page!);
+        return _spliceNodeAtLevel(newNode, update, level + 1);
+      },
+    );
   }
 
   /// Removes [node] from the skip-list and its page.
-  Future<void> deleteNode(IndexNode node) async {
-    for (var i = 0; i < node.levels; i++) {
-      if (!node.prev[i].isEmpty) {
-        final p = await getNode(node.prev[i]);
-        if (i < p.next.length) {
-          p.next[i] = node.next[i];
-          _pager.setDirty(p.page!);
-        }
-      }
-      if (!node.next[i].isEmpty) {
-        final n = await getNode(node.next[i]);
-        if (i < n.prev.length) {
-          n.prev[i] = node.prev[i];
-          _pager.setDirty(n.page!);
-        }
-      }
+  FutureOr<void> deleteNode(IndexNode node) {
+    return _then(_deleteNodeAtLevel(node, 0), (_) {
+      node.page!.deleteNode(node.slot);
+      _pager.setDirty(node.page!);
+      return null;
+    });
+  }
+
+  FutureOr<void> _deleteNodeAtLevel(IndexNode node, int level) {
+    if (level >= node.levels) {
+      return null;
     }
-    node.page!.deleteNode(node.slot);
-    _pager.setDirty(node.page!);
+
+    final deletePrev = node.prev[level].isEmpty
+        ? null
+        : _then(getNode(node.prev[level]), (p) {
+            if (level < p.next.length) {
+              p.next[level] = node.next[level];
+              _pager.setDirty(p.page!);
+            }
+            return null;
+          });
+
+    return _then(deletePrev, (_) {
+      final deleteNext = node.next[level].isEmpty
+          ? null
+          : _then(getNode(node.next[level]), (n) {
+              if (level < n.prev.length) {
+                n.prev[level] = node.prev[level];
+                _pager.setDirty(n.page!);
+              }
+              return null;
+            });
+      return _then(deleteNext, (_) => _deleteNodeAtLevel(node, level + 1));
+    });
   }
 
   // ── Search ────────────────────────────────────────────────────────────────
 
   /// Loads the node at [address].
-  Future<IndexNode> getNode(PageAddress address) async {
-    final page = await _pager.getPage<IndexPage>(address.pageID);
-    return page.getNode(address.index)!;
+  FutureOr<IndexNode> getNode(PageAddress address) {
+    return _then(_pager.getPage<IndexPage>(address.pageID), (page) {
+      return page.getNode(address.index)!;
+    });
   }
 
   /// Iterates all data nodes (excluding head/tail sentinels) in [order].
-  Future<Iterable<IndexNode>> findAll(CollectionIndex index, int order) async {
-    final head = await getNode(index.head);
-    final tail = index.tail;
+  FutureOr<Iterable<IndexNode>> findAll(CollectionIndex index, int order) {
+    return _then(getNode(index.head), (head) {
+      final tail = index.tail;
+      if (order == Query.ascending) {
+        return _findAllAscending(head.next[0], tail, []);
+      } else {
+        return _then(getNode(index.tail), (tailNode) {
+          return _findAllDescending(tailNode.prev[0], index.head, []);
+        });
+      }
+    });
+  }
 
-    var addr = order == Query.ascending ? head.next[0] : (await getNode(index.tail)).prev[0];
-
-    final results = <IndexNode>[];
-
-    while (!addr.isEmpty && addr != (order == Query.ascending ? tail : index.head)) {
-      final node = await getNode(addr);
-      results.add(node);
-      addr = order == Query.ascending ? node.next[0] : node.prev[0];
+  FutureOr<List<IndexNode>> _findAllAscending(PageAddress addr, PageAddress tail, List<IndexNode> results) {
+    var curAddr = addr;
+    while (!curAddr.isEmpty && curAddr != tail) {
+      final res = getNode(curAddr);
+      if (res is Future<IndexNode>) {
+        return res.then((node) {
+          results.add(node);
+          return _findAllAscending(node.next[0], tail, results);
+        });
+      }
+      results.add(res);
+      curAddr = res.next[0];
     }
+    return results;
+  }
 
+  FutureOr<List<IndexNode>> _findAllDescending(PageAddress addr, PageAddress head, List<IndexNode> results) {
+    var curAddr = addr;
+    while (!curAddr.isEmpty && curAddr != head) {
+      final res = getNode(curAddr);
+      if (res is Future<IndexNode>) {
+        return res.then((node) {
+          results.add(node);
+          return _findAllDescending(node.prev[0], head, results);
+        });
+      }
+      results.add(res);
+      curAddr = res.prev[0];
+    }
     return results;
   }
 
   /// Binary-searches the skip-list for [value].
   /// Returns the last node whose key < [value] (exclusive) or
   /// the node whose key == [value] when [sibling] is `true`.
-  Future<IndexNode> find(CollectionIndex index, BsonValue value, {bool sibling = false}) async {
-    var node = await getNode(index.head);
-    for (var i = IndexPage.maxLevels - 1; i >= 0; i--) {
-      while (i < node.next.length && !node.next[i].isEmpty) {
-        final nx = await getNode(node.next[i]);
-        final cmp = nx.key.compareTo(value);
-        if (sibling ? cmp > 0 : cmp >= 0) break;
-        node = nx;
+  FutureOr<IndexNode> find(CollectionIndex index, BsonValue value, {bool sibling = false}) {
+    return _then(getNode(index.head), (headNode) {
+      return _findAtLevel(headNode, value, sibling, IndexPage.maxLevels - 1);
+    });
+  }
+
+  FutureOr<IndexNode> _findAtLevel(IndexNode node, BsonValue value, bool sibling, int level) {
+    var current = node;
+    var i = level;
+    while (i >= 0) {
+      final res = _findInLevel(current, value, sibling, i);
+      if (res is Future<IndexNode>) {
+        return res.then((next) => _findAtLevel(next, value, sibling, i - 1));
       }
+      current = res;
+      i--;
     }
-    return node;
+    return current;
+  }
+
+  FutureOr<IndexNode> _findInLevel(IndexNode node, BsonValue value, bool sibling, int level) {
+    var current = node;
+    while (level < current.next.length && !current.next[level].isEmpty) {
+      final res = getNode(current.next[level]);
+      if (res is Future<IndexNode>) {
+        return res.then((nx) {
+          final cmp = nx.key.compareTo(value);
+          if (sibling ? cmp > 0 : cmp >= 0) {
+            return current;
+          }
+          return _findInLevel(nx, value, sibling, level);
+        });
+      }
+
+      final nx = res;
+      final cmp = nx.key.compareTo(value);
+      if (sibling ? cmp > 0 : cmp >= 0) {
+        return current;
+      }
+      current = nx;
+    }
+    return current;
   }
 
   // ── Private ───────────────────────────────────────────────────────────────
@@ -189,33 +322,39 @@ class IndexService {
     return h;
   }
 
-  Future<IndexNode> _allocateNode(CollectionIndex index, BsonValue key, PageAddress dataBlock, int levels) async {
-    final page = await _getOrCreateIndexPage(index, levels);
-    final slot = _nextSlot(page.nodes.keys);
-    final node = IndexNode(slot: slot, levels: levels, key: key, page: page)..dataBlock = dataBlock;
-    page.addNode(node);
-    _pager.setDirty(page);
-    return node;
+  FutureOr<IndexNode> _allocateNode(CollectionIndex index, BsonValue key, PageAddress dataBlock, int levels) {
+    return _then(_getOrCreateIndexPage(index, levels), (page) {
+      final slot = _nextSlot(page.nodes.keys);
+      final node = IndexNode(slot: slot, levels: levels, key: key, page: page)..dataBlock = dataBlock;
+      page.addNode(node);
+      _pager.setDirty(page);
+      return node;
+    });
   }
 
-  Future<IndexPage> _getOrCreateIndexPage(CollectionIndex index, int requiredLevels) async {
+  FutureOr<IndexPage> _getOrCreateIndexPage(CollectionIndex index, int requiredLevels) {
     // Estimate bytes needed: baseSize + key(max ~64) + levels * 10
     final needed = IndexNode.baseSize + 64 + requiredLevels * 10;
 
     if (index.freeIndexPageID != PageAddress.emptyPageId) {
-      final page = await _pager.getPage<IndexPage>(index.freeIndexPageID);
-      if (page.freeBytes >= needed) return page;
+      return _then(_pager.getPage<IndexPage>(index.freeIndexPageID), (page) {
+        if (page.freeBytes >= needed) return page;
+
+        // Current page is full, create a new one
+        return _createNewIndexPage(index, page);
+      });
     }
 
-    IndexPage? last;
-    if (index.freeIndexPageID != PageAddress.emptyPageId) {
-      last = await _pager.getPage<IndexPage>(index.freeIndexPageID);
-    }
+    // No index page yet, create first one
+    return _createNewIndexPage(index, null);
+  }
 
-    final newPage = await _pager.newPage<IndexPage>((id) => IndexPage(id), last);
-    index.freeIndexPageID = newPage.pageID;
-    if (index.page != null) _pager.setDirty(index.page!);
-    return newPage;
+  FutureOr<IndexPage> _createNewIndexPage(CollectionIndex index, IndexPage? last) {
+    return _then(_pager.newPage<IndexPage>((id) => IndexPage(id), last), (newPage) {
+      index.freeIndexPageID = newPage.pageID;
+      if (index.page != null) _pager.setDirty(index.page!);
+      return newPage;
+    });
   }
 
   static int _nextSlot(Iterable<int> used) {

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import '../../bson/bson_value.dart';
@@ -17,87 +18,126 @@ class DataService {
 
   DataService(this._pager);
 
+  // ── Helper for chaining FutureOr operations ────────────────────────────────
+
+  FutureOr<R> _then<T, R>(FutureOr<T> value, FutureOr<R> Function(T) action) {
+    if (value is Future<T>) {
+      return value.then((v) => action(v));
+    }
+    return action(value);
+  }
+
   // ── Write ─────────────────────────────────────────────────────────────────
 
-  Future<DataBlock> insert(CollectionPage col, BsonDocument doc) async {
+  FutureOr<DataBlock> insert(CollectionPage col, BsonDocument doc) {
     final bytes = BsonWriter.serializeDocument(doc);
 
-    final dataPage = await _getOrCreateDataPage(col, bytes.length);
-    final slot = _nextSlot(dataPage.dataBlocks.keys);
+    return _then(_getOrCreateDataPage(col, bytes.length), (dataPage) {
+      final slot = _nextSlot(dataPage.dataBlocks.keys);
 
-    // Inline as much as fits on the DataPage
-    final inlineLen = math.min(bytes.length, dataPage.freeBytes - DataBlock.fixedSize);
-    final inlineData = Uint8List.sublistView(bytes, 0, inlineLen);
+      // Inline as much as fits on the DataPage
+      final inlineLen = math.min(bytes.length, dataPage.freeBytes - DataBlock.fixedSize);
+      final inlineData = Uint8List.sublistView(bytes, 0, inlineLen);
 
-    final block = DataBlock(
-      position: PageAddress(dataPage.pageID, slot),
-      dataLength: bytes.length,
-      data: inlineData,
-      page: dataPage,
-    );
+      final block = DataBlock(
+        position: PageAddress(dataPage.pageID, slot),
+        dataLength: bytes.length,
+        data: inlineData,
+        page: dataPage,
+      );
 
-    dataPage.addBlock(block);
-    _pager.setDirty(dataPage);
+      dataPage.addBlock(block);
+      _pager.setDirty(dataPage);
 
-    // Write remaining bytes into ExtendPage chain
-    if (bytes.length > inlineLen) {
-      await _writeExtendChain(block, bytes, inlineLen);
-    }
-
-    col.documentCount++;
-    _pager.setDirty(col);
-    return block;
+      // Write remaining bytes into ExtendPage chain
+      if (bytes.length > inlineLen) {
+        return _then(_writeExtendChain(block, bytes, inlineLen), (_) {
+          col.documentCount++;
+          _pager.setDirty(col);
+          return block;
+        });
+      } else {
+        col.documentCount++;
+        _pager.setDirty(col);
+        return block;
+      }
+    });
   }
 
-  Future<DataBlock> update(CollectionPage col, PageAddress address, BsonDocument doc) async {
-    await _deleteInternal(col, address, decrementCount: false);
-    return insert(col, doc);
+  FutureOr<DataBlock> update(CollectionPage col, PageAddress address, BsonDocument doc) {
+    return _then(_deleteInternal(col, address, decrementCount: false), (_) {
+      return insert(col, doc);
+    });
   }
 
-  Future<void> delete(CollectionPage col, PageAddress address) => _deleteInternal(col, address, decrementCount: true);
+  FutureOr<void> delete(CollectionPage col, PageAddress address) {
+    return _deleteInternal(col, address, decrementCount: true);
+  }
 
   // ── Read ──────────────────────────────────────────────────────────────────
 
-  Future<BsonDocument> read(PageAddress address) async {
-    final dataPage = await _pager.getPage<DataPage>(address.pageID);
-    final block = dataPage.getBlock(address.index)!;
+  FutureOr<BsonDocument> read(PageAddress address) {
+    return _then(_pager.getPage<DataPage>(address.pageID), (dataPage) {
+      final block = dataPage.getBlock(address.index)!;
 
-    final all = Uint8List(block.dataLength);
-    all.setRange(0, block.data.length, block.data);
+      final all = Uint8List(block.dataLength);
+      all.setRange(0, block.data.length, block.data);
 
-    if (block.hasExtend) {
-      var offset = block.data.length;
-      var extId = block.extendPageID;
-      while (extId != PageAddress.emptyPageId && offset < block.dataLength) {
-        final ext = await _pager.getPage<ExtendPage>(extId);
-        final copyLen = math.min(block.dataLength - offset, ext.content.length);
-        all.setRange(offset, offset + copyLen, ext.content);
-        offset += copyLen;
-        extId = ext.nextPageID;
+      if (block.hasExtend) {
+        return _then(_readExtendChain(block, all), (_) {
+          return BsonReader.deserializeDocument(all);
+        });
+      } else {
+        return BsonReader.deserializeDocument(all);
       }
-    }
-
-    return BsonReader.deserializeDocument(all);
+    });
   }
 
   // ── Private ───────────────────────────────────────────────────────────────
 
-  Future<void> _deleteInternal(CollectionPage col, PageAddress address, {required bool decrementCount}) async {
-    final dataPage = await _pager.getPage<DataPage>(address.pageID);
-    final block = dataPage.getBlock(address.index);
-    if (block == null) return;
+  FutureOr<void> _readExtendChain(DataBlock block, Uint8List all) {
+    return _readExtendChainHelper(block.extendPageID, block.dataLength, block.data.length, all);
+  }
 
-    // Free ExtendPage chain
-    if (block.hasExtend) {
-      var extId = block.extendPageID;
-      while (extId != PageAddress.emptyPageId) {
-        final ext = await _pager.getPage<ExtendPage>(extId);
-        final nextId = ext.nextPageID;
-        _pager.freePage(ext);
-        extId = nextId;
+  FutureOr<void> _readExtendChainHelper(int extId, int dataLength, int offset, Uint8List all) {
+    var curExtId = extId;
+    var curOffset = offset;
+    while (curExtId != PageAddress.emptyPageId && curOffset < dataLength) {
+      final res = _pager.getPage<ExtendPage>(curExtId);
+      if (res is Future<ExtendPage>) {
+        return res.then((ext) {
+          final copyLen = math.min(dataLength - curOffset, ext.content.length);
+          all.setRange(curOffset, curOffset + copyLen, ext.content);
+          return _readExtendChainHelper(ext.nextPageID, dataLength, curOffset + copyLen, all);
+        });
       }
-    }
 
+      final ext = res;
+      final copyLen = math.min(dataLength - curOffset, ext.content.length);
+      all.setRange(curOffset, curOffset + copyLen, ext.content);
+      curExtId = ext.nextPageID;
+      curOffset += copyLen;
+    }
+    return null;
+  }
+
+  FutureOr<void> _deleteInternal(CollectionPage col, PageAddress address, {required bool decrementCount}) {
+    return _then(_pager.getPage<DataPage>(address.pageID), (dataPage) {
+      final block = dataPage.getBlock(address.index);
+      if (block == null) return null;
+
+      // Free ExtendPage chain
+      if (block.hasExtend) {
+        return _then(_deleteExtendChain(block.extendPageID), (_) {
+          return _finishDelete(col, address, dataPage, block, decrementCount);
+        });
+      } else {
+        return _finishDelete(col, address, dataPage, block, decrementCount);
+      }
+    });
+  }
+
+  FutureOr<void> _finishDelete(CollectionPage col, PageAddress address, DataPage dataPage, DataBlock block, bool decrementCount) {
     dataPage.deleteBlock(address.index);
     _pager.setDirty(dataPage);
 
@@ -111,37 +151,81 @@ class DataService {
       col.freeDataPageID = dataPage.pageID;
       _pager.setDirty(col);
     }
+    return null;
   }
 
-  Future<void> _writeExtendChain(DataBlock block, Uint8List bytes, int startOffset) async {
-    var offset = startOffset;
-    ExtendPage? prev;
+  FutureOr<void> _deleteExtendChain(int extId) {
+    var curExtId = extId;
+    while (curExtId != PageAddress.emptyPageId) {
+      final res = _pager.getPage<ExtendPage>(curExtId);
+      if (res is Future<ExtendPage>) {
+        return res.then((ext) {
+          final nextId = ext.nextPageID;
+          _pager.freePage(ext);
+          return _deleteExtendChain(nextId);
+        });
+      }
 
-    while (offset < bytes.length) {
-      final ext = await _pager.newPage<ExtendPage>((id) => ExtendPage(id), prev);
-      final copyLen = math.min(bytes.length - offset, BasePage.pageAvailableBytes);
-      ext.content.setRange(0, copyLen, bytes.sublist(offset));
-      if (prev == null) block.extendPageID = ext.pageID;
-      _pager.setDirty(ext);
-      prev = ext;
-      offset += copyLen;
+      final ext = res;
+      final nextId = ext.nextPageID;
+      _pager.freePage(ext);
+      curExtId = nextId;
     }
+    return null;
   }
 
-  Future<DataPage> _getOrCreateDataPage(CollectionPage col, int neededBytes) async {
+  FutureOr<void> _writeExtendChain(DataBlock block, Uint8List bytes, int startOffset) {
+    return _writeExtendChainLoop(block, bytes, startOffset, null);
+  }
+
+  FutureOr<void> _writeExtendChainLoop(DataBlock block, Uint8List bytes, int offset, ExtendPage? prev) {
+    var curOffset = offset;
+    var curPrev = prev;
+    while (curOffset < bytes.length) {
+      final res = _pager.newPage<ExtendPage>((id) => ExtendPage(id), curPrev);
+      if (res is Future<ExtendPage>) {
+        return res.then((ext) {
+          final copyLen = math.min(bytes.length - curOffset, BasePage.pageAvailableBytes);
+          ext.content.setAll(0, Uint8List.sublistView(bytes, curOffset, curOffset + copyLen));
+          if (curPrev == null) block.extendPageID = ext.pageID;
+          _pager.setDirty(ext);
+          return _writeExtendChainLoop(block, bytes, curOffset + copyLen, ext);
+        });
+      }
+
+      final ext = res;
+      final copyLen = math.min(bytes.length - curOffset, BasePage.pageAvailableBytes);
+      ext.content.setAll(0, Uint8List.sublistView(bytes, curOffset, curOffset + copyLen));
+      if (curPrev == null) block.extendPageID = ext.pageID;
+      _pager.setDirty(ext);
+      curOffset += copyLen;
+      curPrev = ext;
+    }
+    return null;
+  }
+
+  FutureOr<DataPage> _getOrCreateDataPage(CollectionPage col, int neededBytes) {
     final minFree = DataBlock.fixedSize + math.min(neededBytes, BasePage.pageAvailableBytes);
 
     if (col.freeDataPageID != PageAddress.emptyPageId) {
-      final page = await _pager.getPage<DataPage>(col.freeDataPageID);
-      if (page.freeBytes >= minFree) return page;
+      return _then(_pager.getPage<DataPage>(col.freeDataPageID), (page) {
+        if (page.freeBytes >= minFree) {
+          return page;
+        }
+
+        return _then(_pager.newPage<DataPage>((id) => DataPage(id), page), (newPage) {
+          col.freeDataPageID = newPage.pageID;
+          _pager.setDirty(col);
+          return newPage;
+        });
+      });
     }
 
-    DataPage? prev = col.freeDataPageID != PageAddress.emptyPageId ? await _pager.getPage<DataPage>(col.freeDataPageID) : null;
-
-    final newPage = await _pager.newPage<DataPage>((id) => DataPage(id), prev);
-    col.freeDataPageID = newPage.pageID;
-    _pager.setDirty(col);
-    return newPage;
+    return _then(_pager.newPage<DataPage>((id) => DataPage(id), null), (newPage) {
+      col.freeDataPageID = newPage.pageID;
+      _pager.setDirty(col);
+      return newPage;
+    });
   }
 
   static int _nextSlot(Iterable<int> used) {

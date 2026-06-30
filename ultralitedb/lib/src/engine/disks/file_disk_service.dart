@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -25,141 +26,221 @@ class FileDiskService implements IDiskService {
 
   FileDiskService(this.filename, {FileOptions? options}) : options = options ?? FileOptions();
 
+  bool get _syncIO => options.syncIO;
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   @override
-  Future<void> initialize([String? password]) async {
+  FutureOr<void> initialize([String? password]) {
     final file = File(filename);
-    final exists = await file.exists();
-    final isNew = !exists || (await file.length()) == 0;
 
-    if (isNew) await file.create(recursive: true);
-
-    // FileMode.append = OPEN_ALWAYS on Windows → full random R/W access.
-    _raf = await file.open(mode: FileMode.append);
-
-    if (isNew) await _createDatabase(password);
+    if (_syncIO) {
+      final exists = file.existsSync();
+      final isNew = !exists || file.lengthSync() == 0;
+      if (isNew) file.createSync(recursive: true);
+      _raf = file.openSync(mode: FileMode.append);
+      if (isNew) _createDatabaseSync(password);
+      return null;
+    } else {
+      return Future.sync(() async {
+        final exists = await file.exists();
+        final isNew = !exists || (await file.length()) == 0;
+        if (isNew) await file.create(recursive: true);
+        _raf = await file.open(mode: FileMode.append);
+        if (isNew) await _createDatabase(password);
+      });
+    }
   }
 
   @override
-  Future<void> dispose() async {
-    await _raf?.close();
-    _raf = null;
+  FutureOr<void> dispose() {
+    if (_syncIO) {
+      _raf?.closeSync();
+      _raf = null;
+    } else {
+      return _raf?.close().then((_) => _raf = null);
+    }
   }
 
   // ── Page I/O ──────────────────────────────────────────────────────────────
 
   @override
-  Future<Uint8List> readPage(int pageID) async {
+  FutureOr<Uint8List> readPage(int pageID) {
     final buffer = Uint8List(BasePage.pageSize);
-    await _raf!.setPosition(BasePage.getSizeOfPages(pageID));
-    await _raf!.readInto(buffer);
-    return buffer;
+    final pos = BasePage.getSizeOfPages(pageID);
+    if (_syncIO) {
+      _raf!.setPositionSync(pos);
+      _raf!.readIntoSync(buffer);
+      return buffer;
+    } else {
+      return _raf!.setPosition(pos).then((_) => _raf!.readInto(buffer)).then((_) => buffer);
+    }
   }
 
   @override
-  Future<void> writePage(int pageID, Uint8List buffer) async {
-    await _raf!.setPosition(BasePage.getSizeOfPages(pageID));
-    await _raf!.writeFrom(buffer);
+  FutureOr<void> writePage(int pageID, Uint8List buffer) {
+    final pos = BasePage.getSizeOfPages(pageID);
+    if (_syncIO) {
+      _raf!.setPositionSync(pos);
+      _raf!.writeFromSync(buffer);
+    } else {
+      return _raf!.setPosition(pos).then((_) => _raf!.writeFrom(buffer));
+    }
   }
 
   @override
-  Future<void> setLength(int fileSize) async {
+  FutureOr<void> setLength(int fileSize) {
     if (fileSize > options.limitSize) {
       throw StateError('File size limit exceeded: $fileSize > ${options.limitSize}');
     }
-    await _raf!.truncate(fileSize); // truncate also extends (zero-fills)
+    if (_syncIO) {
+      _raf!.truncateSync(fileSize);
+    } else {
+      return _raf!.truncate(fileSize);
+    }
   }
 
   @override
-  Future<int> getFileLength() async => await _raf?.length() ?? 0;
+  FutureOr<int> getFileLength() {
+    if (_syncIO) {
+      return _raf?.lengthSync() ?? 0;
+    } else {
+      return _raf?.length() ?? Future.value(0);
+    }
+  }
 
   // ── Journal ───────────────────────────────────────────────────────────────
 
   @override
   bool get isJournalEnabled => options.journal;
 
-  /// Appends [pages] right after the data area (after page [lastPageID]).
-  /// Extends the file to `(lastPageID+1)*PAGE_SIZE + pages*PAGE_SIZE`.
   @override
-  Future<void> writeJournal(List<Uint8List> pages, int lastPageID) async {
-    if (!options.journal || pages.isEmpty) return;
+  FutureOr<void> writeJournal(List<Uint8List> pages, int lastPageID) {
+    if (!options.journal || pages.isEmpty) return null;
 
     final journalStart = BasePage.getSizeOfPages(lastPageID + 1);
     final totalSize = journalStart + pages.length * BasePage.pageSize;
 
-    await _raf!.truncate(totalSize); // extend file to hold journal area
-    await _raf!.setPosition(journalStart);
-
-    for (final buf in pages) {
-      await _raf!.writeFrom(buf);
+    if (_syncIO) {
+      _raf!.truncateSync(totalSize);
+      _raf!.setPositionSync(journalStart);
+      for (final buf in pages) _raf!.writeFromSync(buf);
+      _raf!.flushSync();
+    } else {
+      return _raf!
+          .truncate(totalSize)
+          .then((_) => _raf!.setPosition(journalStart))
+          .then((_) => Future.forEach(pages, (Uint8List buf) => _raf!.writeFrom(buf)))
+          .then((_) => flush());
     }
-
-    await flush(); // ensure journal hits disk before we touch data area
   }
 
-  /// Yields each [BasePage.pageSize]-chunk from the journal area.
   @override
-  Future<Iterable<Uint8List>> readJournal(int lastPageID) async {
-    final journalStart = BasePage.getSizeOfPages(lastPageID + 1);
-    final len = await _raf!.length();
-    if (len <= journalStart) return const [];
+  FutureOr<Iterable<Uint8List>> readJournal(int lastPageID) {
+    if (_syncIO) {
+      final len = _raf!.lengthSync();
+      final start = BasePage.getSizeOfPages(lastPageID + 1);
+      if (len <= start) return const [];
 
-    await _raf!.setPosition(journalStart);
-    var pos = journalStart;
-    final results = <Uint8List>[];
+      final count = (len - start) ~/ BasePage.pageSize;
+      final result = <Uint8List>[];
+      _raf!.setPositionSync(start);
+      for (var i = 0; i < count; i++) {
+        final buf = Uint8List(BasePage.pageSize);
+        _raf!.readIntoSync(buf);
+        result.add(buf);
+      }
+      return result;
+    } else {
+      return _raf!.length().then((len) {
+        final start = BasePage.getSizeOfPages(lastPageID + 1);
+        if (len <= start) return const <Uint8List>[];
+        final count = (len - start) ~/ BasePage.pageSize;
+        return _readJournalAsync(start, count);
+      });
+    }
+  }
 
-    while (pos + BasePage.pageSize <= len) {
+  Future<Iterable<Uint8List>> _readJournalAsync(int start, int count) async {
+    final result = <Uint8List>[];
+    await _raf!.setPosition(start);
+    for (var i = 0; i < count; i++) {
       final buf = Uint8List(BasePage.pageSize);
-      final read = await _raf!.readInto(buf);
-      if (read < BasePage.pageSize) break;
-      results.add(buf);
-      pos += BasePage.pageSize;
+      await _raf!.readInto(buf);
+      result.add(buf);
     }
-    return results;
+    return result;
   }
 
-  /// Truncates the file back to the data area — removes journal.
   @override
-  Future<void> clearJournal(int lastPageID) async => await _raf!.truncate(BasePage.getSizeOfPages(lastPageID + 1));
+  FutureOr<void> clearJournal(int lastPageID) {
+    final size = BasePage.getSizeOfPages(lastPageID + 1);
+    if (_syncIO) {
+      _raf!.truncateSync(size);
+      _raf!.flushSync();
+    } else {
+      return _raf!.truncate(size).then((_) => flush());
+    }
+  }
 
   @override
-  Future<void> flush() async => await _raf!.flush();
+  FutureOr<void> flush() {
+    if (_syncIO) {
+      _raf!.flushSync();
+    } else {
+      return _raf!.flush();
+    }
+  }
 
   // ── Database creation ─────────────────────────────────────────────────────
 
-  /// Mirrors C# UltraLiteEngine.CreateDatabase(stream, password, initialSize).
-  Future<void> _createDatabase(String? password) async {
+  void _createDatabaseSync([String? password]) {
     final rawEmpty = options.initialSize;
     final emptyPages = rawEmpty <= 2 * BasePage.pageSize ? 0 : (rawEmpty - 2 * BasePage.pageSize) ~/ BasePage.pageSize;
 
-    // ── Page 0: HeaderPage ────────────────────────────────────────────────
+    final header = HeaderPage(0)
+      ..lastPageId = emptyPages == 0 ? 1 : emptyPages + 1
+      ..freeEmptyPageId = emptyPages == 0 ? PageAddress.emptyPageId : 2;
+
+    _raf!.setPositionSync(0);
+    _raf!.writeFromSync(header.toBuffer());
+    _raf!.writeFromSync(Uint8List(BasePage.pageSize)); // lock area
+
+    if (emptyPages > 0) {
+      _raf!.truncateSync(rawEmpty.toInt());
+      for (var pageID = 2; pageID <= emptyPages + 1; pageID++) {
+        final empty = EmptyPage(pageID)
+          ..prevPageID = pageID == 2 ? 0 : pageID - 1
+          ..nextPageID = pageID == emptyPages + 1 ? PageAddress.emptyPageId : pageID + 1;
+        _raf!.setPositionSync(BasePage.getSizeOfPages(pageID));
+        _raf!.writeFromSync(empty.toBuffer());
+      }
+    }
+    _raf!.flushSync();
+  }
+
+  Future<void> _createDatabase([String? password]) async {
+    final rawEmpty = options.initialSize;
+    final emptyPages = rawEmpty <= 2 * BasePage.pageSize ? 0 : (rawEmpty - 2 * BasePage.pageSize) ~/ BasePage.pageSize;
+
     final header = HeaderPage(0)
       ..lastPageId = emptyPages == 0 ? 1 : emptyPages + 1
       ..freeEmptyPageId = emptyPages == 0 ? PageAddress.emptyPageId : 2;
 
     await _raf!.setPosition(0);
     await _raf!.writeFrom(header.toBuffer());
-
-    // ── Page 1: Lock area (plain zeros) ───────────────────────────────────
     await _raf!.writeFrom(Uint8List(BasePage.pageSize));
 
-    // ── Pages 2..emptyPages+1: doubly-linked EmptyPage chain ─────────────
     if (emptyPages > 0) {
-      await _raf!.truncate(rawEmpty.toInt()); // pre-allocate full initial size
-
+      await _raf!.truncate(rawEmpty.toInt());
       for (var pageID = 2; pageID <= emptyPages + 1; pageID++) {
         final empty = EmptyPage(pageID)
-          ..prevPageID = pageID == 2
-              ? 0 // points back to header (list head sentinel)
-              : pageID - 1
+          ..prevPageID = pageID == 2 ? 0 : pageID - 1
           ..nextPageID = pageID == emptyPages + 1 ? PageAddress.emptyPageId : pageID + 1;
-
         await _raf!.setPosition(BasePage.getSizeOfPages(pageID));
         await _raf!.writeFrom(empty.toBuffer());
       }
     }
-
     await flush();
   }
 }

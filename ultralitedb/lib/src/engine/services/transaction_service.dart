@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'disk_service.dart';
 import 'page_service.dart';
 
@@ -12,6 +13,15 @@ class TransactionService {
 
   TransactionService(this._disk, this._pager);
 
+  // ── Helper for chaining FutureOr operations ────────────────────────────────
+
+  FutureOr<R> _then<T, R>(FutureOr<T> value, FutureOr<R> Function(T) action) {
+    if (value is Future<T>) {
+      return value.then((v) => action(v));
+    }
+    return action(value);
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   void begin() {
@@ -23,41 +33,57 @@ class TransactionService {
   /// 2. Persist dirty pages to the data area.
   /// 3. Remove journal (if enabled).
   /// 4. Flush OS buffers.
-  Future<void> commit() async {
+  FutureOr<void> commit() {
     if (!_active) throw StateError('No active transaction to commit');
 
     final dirty = _pager.cache.getDirtyPages();
     final lastPageId = _pager.header.lastPageId;
 
-    if (dirty.isNotEmpty) {
-      if (_disk.isJournalEnabled) {
-        // Write new page state to journal BEFORE touching data area
-        await _disk.writeJournal(dirty.map((p) => p.toBuffer()).toList(), lastPageId);
-      }
-
-      await _pager.flushDirtyPages(); // write to data area
-
-      if (_disk.isJournalEnabled) {
-        await _disk.clearJournal(lastPageId); // truncate journal area
-      }
-
-      await _disk.flush();
+    if (dirty.isEmpty) {
+      _active = false;
+      return null;
     }
 
-    _active = false;
+    if (_disk.isJournalEnabled) {
+      return _then(_disk.writeJournal(dirty.map((p) => p.toBuffer()).toList(), lastPageId), (_) {
+        return _then(_pager.flushDirtyPages(), (_) {
+          return _then(_disk.clearJournal(lastPageId), (_) {
+            return _then(_disk.flush(), (_) {
+              _active = false;
+              return null;
+            });
+          });
+        });
+      });
+    } else {
+      return _then(_pager.flushDirtyPages(), (_) {
+        return _then(_disk.flush(), (_) {
+          _active = false;
+          return null;
+        });
+      });
+    }
   }
 
   /// Discards all in-memory changes and re-reads the header from disk.
-  Future<void> rollback() async {
+  FutureOr<void> rollback() {
     if (!_active) throw StateError('No active transaction to roll back');
     _pager.cache.clear();
-    await _pager.initialize(); // re-reads header (no journal needed — nothing was written)
-    _active = false;
+    return _then(_pager.initialize(), (_) {
+      _active = false;
+      return null;
+    });
   }
 
   /// Commit current transaction and immediately begin a new one.
-  Future<void> checkpoint() async {
-    if (_active) await commit();
+  FutureOr<void> checkpoint() {
+    if (_active) {
+      return _then(commit(), (_) {
+        begin();
+        return null;
+      });
+    }
     begin();
+    return null;
   }
 }

@@ -14,10 +14,16 @@ class FileOptions {
   /// Default: `false` (rely on OS buffering).
   bool forceFlush;
 
+  /// If `true`, all I/O operations will use synchronous `dart:io` methods.
+  /// This allows the engine to return values synchronously (not `Future`).
+  /// Default: `false`.
+  bool syncIO;
+
   FileOptions({
     this.journal = true,
     this.initialSize = 0,
     this.limitSize = 9223372036854775807, // int max
     this.forceFlush = false,
+    this.syncIO = false,
   });
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 import '../pages/base_page.dart';
 import '../pages/collection_page.dart';
@@ -21,53 +22,81 @@ class PageService {
   HeaderPage get header => _header;
   CacheService get cache => _cache;
 
+  // ── Helper for chaining FutureOr operations ────────────────────────────────
+
+  FutureOr<R> _then<T, R>(FutureOr<T> value, FutureOr<R> Function(T) action) {
+    if (value is Future<T>) {
+      return value.then((v) => action(v));
+    }
+    return action(value);
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   /// Call once after constructing services.
   /// Opens the backing store, recovers from journal if needed, loads header.
-  Future<void> initialize([String? password]) async {
-    await _disk.initialize(password);
+  FutureOr<void> initialize([String? password]) {
+    return _then(_disk.initialize(password), (_) {
+      // Read header to learn lastPageId (needed for journal boundary check)
+      return _then(getPage<HeaderPage>(0), (header) {
+        _header = header;
 
-    // Read header to learn lastPageId (needed for journal boundary check)
-    _header = await getPage<HeaderPage>(0);
-
-    // Journal recovery: file is longer than data area ⟹ incomplete commit
-    final dataAreaSize = BasePage.getSizeOfPages(_header.lastPageId + 1);
-    if ((await _disk.getFileLength()) > dataAreaSize && _disk.isJournalEnabled) {
-      _cache.clear(); // discard any cached pages
-      await _replayJournal(_header.lastPageId);
-      _cache.clear(); // discard after replay
-      _header = await getPage<HeaderPage>(0); // reload clean header
-    }
+        // Journal recovery: file is longer than data area ⟹ incomplete commit
+        return _then(_disk.getFileLength(), (fileLength) {
+          final dataAreaSize = BasePage.getSizeOfPages(_header.lastPageId + 1);
+          if (fileLength > dataAreaSize && _disk.isJournalEnabled) {
+            _cache.clear(); // discard any cached pages
+            return _then(_replayJournal(_header.lastPageId), (_) {
+              _cache.clear(); // discard after replay
+              return _then(getPage<HeaderPage>(0), (cleanHeader) {
+                _header = cleanHeader;
+                return null;
+              });
+            });
+          }
+          return null;
+        });
+      });
+    });
   }
 
   // ── Page access ───────────────────────────────────────────────────────────
 
-  Future<T> getPage<T extends BasePage>(int pageID) async {
-    var page = _cache.getPage<BasePage>(pageID);
-    if (page != null) return page as T;
-    page = await _loadFromDisk(pageID);
-    _cache.addPage(page);
-    return page as T;
+  FutureOr<T> getPage<T extends BasePage>(int pageID) {
+    var page = _cache.getPage<T>(pageID);
+    if (page != null) return page;
+
+    return _then(_loadFromDisk(pageID), (loaded) {
+      _cache.addPage(loaded);
+      return loaded as T;
+    });
   }
 
   void setDirty(BasePage page) => _cache.setDirty(page);
 
   // ── Allocation ────────────────────────────────────────────────────────────
 
-  Future<T> newPage<T extends BasePage>(T Function(int pageID) pageCallback, [BasePage? prevPage]) async {
-    final T page;
-
+  FutureOr<T> newPage<T extends BasePage>(T Function(int pageID) pageCallback, [BasePage? prevPage]) {
     if (_header.freeEmptyPageId != PageAddress.emptyPageId) {
-      final empty = await getPage<EmptyPage>(_header.freeEmptyPageId);
-      _header.freeEmptyPageId = empty.nextPageID;
-      page = pageCallback(empty.pageID);
+      return _then(getPage<EmptyPage>(_header.freeEmptyPageId), (empty) {
+        _header.freeEmptyPageId = empty.nextPageID;
+        final page = pageCallback(empty.pageID);
+        _initializeAndCachePage(page, prevPage);
+        return page as T;
+      });
     } else {
       _header.lastPageId++;
-      page = pageCallback(_header.lastPageId);
-      await _disk.setLength((_header.lastPageId + 1) * BasePage.pageSize);
-    }
+      final pageID = _header.lastPageId;
+      final page = pageCallback(pageID);
 
+      return _then(_disk.setLength((pageID + 1) * BasePage.pageSize), (_) {
+        _initializeAndCachePage(page, prevPage);
+        return page as T;
+      });
+    }
+  }
+
+  void _initializeAndCachePage<T extends BasePage>(T page, BasePage? prevPage) {
     page
       ..itemCount = 0
       ..freeBytes = BasePage.pageAvailableBytes
@@ -81,7 +110,6 @@ class PageService {
 
     setDirty(_header);
     _cache.addPage(page);
-    return page;
   }
 
   void freePage(BasePage page) {
@@ -95,53 +123,89 @@ class PageService {
     _cache.addPage(empty);
   }
 
-  Future<Iterable<T>> getSeqPages<T extends BasePage>(int firstPageID) async {
-    final results = <T>[];
-    var id = firstPageID;
-    while (id != PageAddress.emptyPageId) {
-      final page = await getPage<T>(id);
-      results.add(page);
-      id = page.nextPageID;
+  FutureOr<Iterable<T>> getSeqPages<T extends BasePage>(int firstPageID) {
+    return _getSeqPagesLoop<T>(firstPageID, []);
+  }
+
+  FutureOr<Iterable<T>> _getSeqPagesLoop<T extends BasePage>(int id, List<T> results) {
+    var curId = id;
+    while (curId != PageAddress.emptyPageId) {
+      final res = getPage<T>(curId);
+      if (res is Future<T>) {
+        return res.then((page) {
+          results.add(page);
+          return _getSeqPagesLoop<T>(page.nextPageID, results);
+        });
+      }
+      results.add(res);
+      curId = res.nextPageID;
     }
     return results;
   }
 
-  Future<void> flushDirtyPages() async {
-    for (final page in _cache.getDirtyPages()) {
-      await _disk.writePage(page.pageID, page.toBuffer());
+  FutureOr<void> flushDirtyPages() {
+    final dirtyPages = _cache.getDirtyPages();
+    return _flushDirtyPagesLoop(dirtyPages, 0);
+  }
+
+  FutureOr<void> _flushDirtyPagesLoop(List<BasePage> pages, int index) {
+    var i = index;
+    while (i < pages.length) {
+      final page = pages[i];
+      final res = _disk.writePage(page.pageID, page.toBuffer());
+      if (res is Future) {
+        return res.then((_) => _flushDirtyPagesLoop(pages, i + 1));
+      }
+      i++;
     }
     _cache.clearDirty();
+    return null;
   }
 
   // ── Private ───────────────────────────────────────────────────────────────
 
   /// Replay journal pages back into the data area, then remove journal.
-  Future<void> _replayJournal(int lastPageId) async {
-    for (final buf in await _disk.readJournal(lastPageId)) {
-      // First 4 bytes of every page buffer = pageID (BasePage._pPageId = 0)
-      final pageID = ByteData.sublistView(buf).getUint32(0, Endian.little);
-      await _disk.writePage(pageID, buf);
-    }
-    await _disk.clearJournal(lastPageId);
-    await _disk.flush();
+  FutureOr<void> _replayJournal(int lastPageId) {
+    return _then(_disk.readJournal(lastPageId), (buffers) {
+      return _replayJournalLoop(buffers.toList(), 0, lastPageId);
+    });
   }
 
-  Future<BasePage> _loadFromDisk(int pageID) async {
-    final buffer = await _disk.readPage(pageID);
-    final bd = ByteData.sublistView(buffer);
-    final type = PageType.fromByte(bd.getUint8(4)); // offset 4 = pageType
+  FutureOr<void> _replayJournalLoop(List<Uint8List> buffers, int index, int lastPageId) {
+    var i = index;
+    while (i < buffers.length) {
+      final buf = buffers[i];
+      // First 4 bytes of every page buffer = pageID (BasePage._pPageId = 0)
+      final pageID = ByteData.sublistView(buf).getUint32(0, Endian.little);
+      final res = _disk.writePage(pageID, buf);
+      if (res is Future) {
+        return res.then((_) => _replayJournalLoop(buffers, i + 1, lastPageId));
+      }
+      i++;
+    }
 
-    final page = switch (type) {
-      PageType.header => HeaderPage(pageID),
-      PageType.collection => CollectionPage(pageID),
-      PageType.indexPage => IndexPage(pageID),
-      PageType.data => DataPage(pageID),
-      PageType.extend => ExtendPage(pageID),
-      PageType.empty => EmptyPage(pageID),
-    };
+    return _then(_disk.clearJournal(lastPageId), (_) {
+      return _disk.flush();
+    });
+  }
 
-    page.readHeader(bd);
-    page.readContent(bd);
-    return page;
+  FutureOr<BasePage> _loadFromDisk(int pageID) {
+    return _then(_disk.readPage(pageID), (buffer) {
+      final bd = ByteData.sublistView(buffer);
+      final type = PageType.fromByte(bd.getUint8(4)); // offset 4 = pageType
+
+      final page = switch (type) {
+        PageType.header => HeaderPage(pageID),
+        PageType.collection => CollectionPage(pageID),
+        PageType.indexPage => IndexPage(pageID),
+        PageType.data => DataPage(pageID),
+        PageType.extend => ExtendPage(pageID),
+        PageType.empty => EmptyPage(pageID),
+      };
+
+      page.readHeader(bd);
+      page.readContent(bd);
+      return page;
+    });
   }
 }
