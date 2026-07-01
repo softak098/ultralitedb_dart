@@ -11,6 +11,8 @@ import 'objectid.dart';
 class BsonReader {
   static BsonDocument deserializeDocument(Uint8List bytes) => _readDocument(_Buf(bytes));
 
+  static BsonArray deserializeArray(Uint8List bytes) => _readArray(_Buf(bytes));
+
   // ── internals ─────────────────────────────────────────────────────────────
 
   static BsonDocument _readDocument(_Buf r) {
@@ -60,19 +62,31 @@ class BsonReader {
 /// Read cursor over a [Uint8List]. All multi-byte reads are little-endian.
 class _Buf {
   final Uint8List _b;
+  late final ByteData _bd;
   int _p = 0;
 
-  _Buf(this._b);
+  static final Map<int, String> _cache = {};
+
+  _Buf(this._b) {
+    _bd = ByteData.sublistView(_b);
+  }
 
   int readByte() => _b[_p++];
 
   String readCString() {
     final start = _p;
+    var hash = 0;
     while (_b[_p] != 0) {
+      hash = (hash * 31 + _b[_p]) & 0xFFFFFFFF;
       _p++;
     }
-    final s = utf8.decode(_b.sublist(start, _p));
+    if (_cache.containsKey(hash)) {
+      _p++; // skip null
+      return _cache[hash]!;
+    }
+    final s = utf8.decode(Uint8List.sublistView(_b, start, _p));
     _p++; // consume null terminator
+    if (_cache.length < 500) _cache[hash] = s;
     return s;
   }
 
@@ -83,19 +97,19 @@ class _Buf {
   }
 
   int readInt32() {
-    final v = ByteData.sublistView(_b, _p, _p + 4).getInt32(0, Endian.little);
+    final v = _bd.getInt32(_p, Endian.little);
     _p += 4;
     return v;
   }
 
   int readInt64() {
-    final v = ByteData.sublistView(_b, _p, _p + 8).getInt64(0, Endian.little);
+    final v = _bd.getInt64(_p, Endian.little);
     _p += 8;
     return v;
   }
 
   double readFloat64() {
-    final v = ByteData.sublistView(_b, _p, _p + 8).getFloat64(0, Endian.little);
+    final v = _bd.getFloat64(_p, Endian.little);
     _p += 8;
     return v;
   }

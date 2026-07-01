@@ -9,9 +9,7 @@ class BsonArray extends BsonValue with Iterable<BsonValue> {
   BsonArray() : _items = [], super._init(BsonType.array, null);
 
   /// Creates an array from a Dart iterable; items are auto-converted.
-  BsonArray.from(Iterable<dynamic> items)
-    : _items = [],
-      super._init(BsonType.array, null) {
+  BsonArray.from(Iterable<dynamic> items) : _items = [], super._init(BsonType.array, null) {
     for (final item in items) {
       _items.add(item is BsonValue ? item : BsonValue.from(item));
     }
@@ -100,6 +98,15 @@ class BsonArray extends BsonValue with Iterable<BsonValue> {
 
   @override
   int get hashCode => _items.fold(0, (h, e) => h ^ e.hashCode);
+
+  int _compare(BsonArray other) {
+    final len = math.min(_items.length, other._items.length);
+    for (var i = 0; i < len; i++) {
+      final cmp = _items[i].compareTo(other._items[i]);
+      if (cmp != 0) return cmp;
+    }
+    return _items.length.compareTo(other._items.length);
+  }
 
   @override
   String toString() => '[${_items.join(', ')}]';

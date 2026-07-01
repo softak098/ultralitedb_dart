@@ -86,38 +86,47 @@ class IndexNode {
 
   // ── Key serialization helpers ─────────────────────────────────────────────
 
-  static int _keySize(BsonValue v) => switch (v.type) {
-    BsonType.null_ || BsonType.minValue || BsonType.maxValue => 1,
-    BsonType.boolean => 2,
-    BsonType.int32 => 5,
-    BsonType.int64 || BsonType.double || BsonType.dateTime => 9,
-    BsonType.objectId => 13,
-    BsonType.string => 5 + utf8.encode(v.asStringOrEmpty).length,
-    _ => 1,
-  };
+  static int _keySize(BsonValue v) => 1 + v.getBytesCount(false);
 
   static BsonValue _readKey(ByteData bd, int offset) {
     var p = offset;
     final t = BsonType.fromByte(bd.getUint8(p++));
-    return switch (t) {
-      BsonType.null_ => BsonValue.nullValue(),
-      BsonType.minValue => BsonValue.minValue,
-      BsonType.maxValue => BsonValue.maxValue,
-      BsonType.boolean => BsonValue.fromBool(bd.getUint8(p) != 0),
-      BsonType.int32 => BsonValue.fromInt(bd.getInt32(p, Endian.little)),
-      BsonType.int64 => BsonValue.fromInt64(bd.getInt64(p, Endian.little)),
-      BsonType.double => BsonValue.fromDouble(bd.getFloat64(p, Endian.little)),
-      BsonType.dateTime => BsonValue.fromDateTime(
-        DateTime.fromMillisecondsSinceEpoch(bd.getInt64(p, Endian.little), isUtc: true),
-      ),
-      BsonType.objectId => BsonValue.fromObjectId(ObjectId.fromBytes(Uint8List.sublistView(bd.buffer.asUint8List(), p, p + 12))),
-      BsonType.string => () {
+    switch (t) {
+      case BsonType.null_:
+        return BsonValue.nullValue();
+      case BsonType.minValue:
+        return BsonValue.minValue;
+      case BsonType.maxValue:
+        return BsonValue.maxValue;
+      case BsonType.boolean:
+        return BsonValue.fromBool(bd.getUint8(p) != 0);
+      case BsonType.int32:
+        return BsonValue.fromInt(bd.getInt32(p, Endian.little));
+      case BsonType.int64:
+        return BsonValue.fromInt64(bd.getInt64(p, Endian.little));
+      case BsonType.double:
+        return BsonValue.fromDouble(bd.getFloat64(p, Endian.little));
+      case BsonType.dateTime:
+        return BsonValue.fromDateTime(DateTime.fromMillisecondsSinceEpoch(bd.getInt64(p, Endian.little), isUtc: true));
+      case BsonType.objectId:
+        return BsonValue.fromObjectId(
+          ObjectId.fromBytes(Uint8List.sublistView(bd.buffer.asUint8List(), bd.offsetInBytes + p, bd.offsetInBytes + p + 12)),
+        );
+      case BsonType.string:
         final len = bd.getInt32(p, Endian.little);
-        final bytes = Uint8List.sublistView(bd.buffer.asUint8List(), p + 4, p + 4 + len);
+        final bytes = Uint8List.sublistView(bd.buffer.asUint8List(), bd.offsetInBytes + p + 4, bd.offsetInBytes + p + 4 + len);
         return BsonValue.fromString(utf8.decode(bytes));
-      }(),
-      _ => BsonValue.nullValue(),
-    };
+      case BsonType.array:
+        final len = bd.getInt32(p, Endian.little);
+        final bytes = Uint8List.sublistView(bd.buffer.asUint8List(), bd.offsetInBytes + p, bd.offsetInBytes + p + len);
+        return BsonReader.deserializeArray(bytes);
+      case BsonType.document:
+        final len = bd.getInt32(p, Endian.little);
+        final bytes = Uint8List.sublistView(bd.buffer.asUint8List(), bd.offsetInBytes + p, bd.offsetInBytes + p + len);
+        return BsonReader.deserializeDocument(bytes);
+      default:
+        return BsonValue.nullValue();
+    }
   }
 
   static int _writeKey(ByteData bd, int offset, BsonValue v) {
@@ -136,11 +145,17 @@ class IndexNode {
         bd.setInt64(p, (v.asDateTime ?? BsonValue.unixEpoch).millisecondsSinceEpoch, Endian.little);
       case BsonType.objectId:
         final b = v.asObjectId!.toBytes();
-        for (var i = 0; i < 12; i++) bd.setUint8(p + i, b[i]);
+        bd.buffer.asUint8List().setAll(bd.offsetInBytes + p, b);
       case BsonType.string:
         final enc = utf8.encode(v.asStringOrEmpty);
         bd.setInt32(p, enc.length, Endian.little);
-        for (var i = 0; i < enc.length; i++) bd.setUint8(p + 4 + i, enc[i]);
+        bd.buffer.asUint8List().setAll(bd.offsetInBytes + p + 4, enc);
+      case BsonType.array:
+        final b = BsonWriter.serializeArray(v.asArray!);
+        bd.buffer.asUint8List().setAll(bd.offsetInBytes + p, b);
+      case BsonType.document:
+        final b = BsonWriter.serializeDocument(v.asDocument!);
+        bd.buffer.asUint8List().setAll(bd.offsetInBytes + p, b);
       default:
         break;
     }

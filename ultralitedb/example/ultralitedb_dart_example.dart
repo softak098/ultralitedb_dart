@@ -8,6 +8,7 @@ Future<void> main() async {
 
   //  await t2();
 
+  //tArrayBulkSync();
   await tArrayBulk();
 
   print(s.elapsedMilliseconds);
@@ -15,34 +16,19 @@ Future<void> main() async {
   s.stop();
 }
 
-Future<void> tArrayBulk() async {
+void tArrayBulkSync() {
   // Open database (or create if doesn't exist)
-  var db = await UltraLiteDatabase.file("products_bulk.db", options: FileOptions(syncIO: true));
+  var db = UltraLiteDatabase.fileSync("products_bulk.db", options: FileOptions(syncIO: true));
 
   // Get a collection
   var col = db.getCollection("product_colored");
 
-  //   final c = await col.count(
-  //     Query.between(
-  //       "Price",
-  //       BsonValue.fromDouble(100),
-  //       BsonValue.fromDouble(200),
-  //     ),
-  //   );
-
-  //   print(c);
-
-  //  return;
-
-  //   await col.ensureIndex("Price");
-  col.ensureIndex("Color");
+  col.ensureIndexSync("Color");
 
   final ps = <BsonDocument>[];
 
   for (var i = 0; i < 300000; i++) {
     var p = BsonDocument();
-    // p["Name"] = "Product $i";
-    // p["Price"] = i / 15;
     p["Color"] = ["color-$i", "$i-color"];
     p["_id"] = i;
     p["ProductId"] = i;
@@ -51,19 +37,45 @@ Future<void> tArrayBulk() async {
     ps.add(p);
 
     if (i > 0 && i % 50000 == 0) {
-      //tasks.add(col.insertAll(ps));
-
-      col.insertAll(ps);
+      col.insertAllSync(ps);
       ps.clear();
     }
   }
 
-  //tasks.add(col.insertAll(ps));
-  //await Future.wait(tasks);
+  col.insertAllSync(ps);
 
-  col.insertAll(ps);
+  db.disposeSync();
+}
 
-  db.dispose();
+Future<void> tArrayBulk() async {
+  // Open database (or create if doesn't exist)
+  var db = await UltraLiteDatabase.file("products_bulk.db");
+
+  // Get a collection
+  var col = db.getCollection("product_colored");
+
+  await col.ensureIndex("Color");
+
+  final ps = <BsonDocument>[];
+
+  for (var i = 0; i < 300000; i++) {
+    var p = BsonDocument();
+    p["Color"] = ["color-$i", "$i-color"];
+    p["_id"] = i;
+    p["ProductId"] = i;
+    p["BatchId"] = i - 11;
+
+    ps.add(p);
+
+    if (i > 0 && i % 50000 == 0) {
+      await col.insertAll(ps);
+      ps.clear();
+    }
+  }
+
+  await col.insertAll(ps);
+
+  await db.dispose();
 }
 
 Future<void> t1Bulk() async {

@@ -22,8 +22,8 @@ class CacheService {
   }
 
   void setDirty(BasePage page) {
+    if (page.isDirty) return;
     page.isDirty = true;
-    _pages[page.pageID] = page;
   }
 
   // ── Dirty tracking ────────────────────────────────────────────────────────

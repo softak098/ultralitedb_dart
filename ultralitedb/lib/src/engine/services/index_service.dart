@@ -78,51 +78,102 @@ class IndexService {
 
   // ── Node DML ──────────────────────────────────────────────────────────────
 
-  /// Inserts a new skip-list node for [key] pointing to [dataBlock].
   FutureOr<IndexNode> addNode(CollectionIndex index, BsonValue key, PageAddress dataBlock) {
     final height = _randomHeight();
 
     // Walk from head, finding the insertion predecessor at each level
-    return _then(getNode(index.head), (headNode) {
-      return _then(_walkLevelsForInsert(headNode, key, height, IndexPage.maxLevels - 1, []), (updateList) {
-        // Unique constraint check at level 0
-        if (index.unique && !key.isMinValue && !key.isMaxValue) {
-          if (!updateList[0].next[0].isEmpty) {
-            return _then(getNode(updateList[0].next[0]), (candidate) {
-              if (candidate.key == key) {
-                throw StateError('Unique index "${index.field}" violation: duplicate key $key');
-              }
-              return _allocateAndInsertNode(index, key, dataBlock, height, updateList);
-            });
-          }
+    final res = getNode(index.head);
+    if (res is Future<IndexNode>) {
+      return res.then((headNode) => _addNodeWithHead(index, headNode, key, height, dataBlock));
+    }
+    return _addNodeWithHead(index, res, key, height, dataBlock);
+  }
+
+  FutureOr<IndexNode> _addNodeWithHead(
+    CollectionIndex index,
+    IndexNode headNode,
+    BsonValue key,
+    int height,
+    PageAddress dataBlock,
+  ) {
+    final updateList = List<IndexNode>.filled(IndexPage.maxLevels, headNode);
+    final res = _walkLevelsForInsert(headNode, key, height, IndexPage.maxLevels - 1, updateList);
+    if (res is Future<List<IndexNode>>) {
+      return res.then((u) => _addNodeWithUpdate(index, u, key, height, dataBlock));
+    }
+    return _addNodeWithUpdate(index, res, key, height, dataBlock);
+  }
+
+  FutureOr<IndexNode> _addNodeWithUpdate(
+    CollectionIndex index,
+    List<IndexNode> updateList,
+    BsonValue key,
+    int height,
+    PageAddress dataBlock,
+  ) {
+    // Unique constraint check at level 0
+    if (index.unique && !key.isMinValue && !key.isMaxValue) {
+      final pred0 = updateList[0];
+      if (!pred0.next[0].isEmpty) {
+        final res = getNode(pred0.next[0]);
+        if (res is Future<IndexNode>) {
+          return res.then((candidate) {
+            if (candidate.key == key) {
+              throw StateError('Unique index "${index.field}" violation: duplicate key $key');
+            }
+            return _allocateAndInsertNode(index, key, dataBlock, height, updateList);
+          });
         }
-        return _allocateAndInsertNode(index, key, dataBlock, height, updateList);
-      });
-    });
+        if (res.key == key) {
+          throw StateError('Unique index "${index.field}" violation: duplicate key $key');
+        }
+      }
+    }
+    return _allocateAndInsertNode(index, key, dataBlock, height, updateList);
   }
 
   FutureOr<List<IndexNode>> _walkLevelsForInsert(IndexNode node, BsonValue key, int height, int level, List<IndexNode> update) {
-    if (level < 0) {
-      return update; // update list is built from level max down to 0
-    }
+    var curLevel = level;
+    var curNode = node;
 
-    return _then(_walkLevelForInsert(node, key, level), (pred) {
-      update.add(pred);
-      return _walkLevelsForInsert(pred, key, height, level - 1, update);
-    });
+    while (curLevel >= 0) {
+      final res = _walkLevelForInsert(curNode, key, curLevel);
+      if (res is Future<IndexNode>) {
+        return res.then((pred) {
+          update[curLevel] = pred;
+          return _walkLevelsForInsert(pred, key, height, curLevel - 1, update);
+        });
+      }
+      curNode = res;
+      update[curLevel] = curNode;
+      curLevel--;
+    }
+    return update;
   }
 
   FutureOr<IndexNode> _walkLevelForInsert(IndexNode node, BsonValue key, int level) {
-    if (level >= node.next.length || node.next[level].isEmpty) {
-      return node;
-    }
-
-    return _then(getNode(node.next[level]), (nx) {
-      if (nx.key >= key) {
-        return node;
+    var curNode = node;
+    while (true) {
+      if (level >= curNode.next.length || curNode.next[level].isEmpty) {
+        return curNode;
       }
-      return _walkLevelForInsert(nx, key, level);
-    });
+
+      final res = getNode(curNode.next[level]);
+      if (res is Future<IndexNode>) {
+        return res.then((nx) {
+          if (nx.key >= key) {
+            return curNode;
+          }
+          return _walkLevelForInsert(nx, key, level);
+        });
+      }
+
+      final nx = res;
+      if (nx.key >= key) {
+        return curNode;
+      }
+      curNode = nx;
+    }
   }
 
   FutureOr<IndexNode> _allocateAndInsertNode(
@@ -132,45 +183,66 @@ class IndexService {
     int height,
     List<IndexNode> update,
   ) {
-    // Reverse update list because it was built from IndexPage.maxLevels-1 down to 0,
-    // but we want update[i] to be the insertion predecessor at level i.
-    final reversedUpdate = update.reversed.toList();
+    final res = _allocateNode(index, key, dataBlock, height);
+    if (res is Future<IndexNode>) {
+      return res.then((newNode) {
+        final spliceRes = _spliceNodeAtLevel(newNode, update, 0);
+        if (spliceRes is Future<void>) {
+          return spliceRes.then((_) => newNode);
+        }
+        return newNode;
+      });
+    }
 
-    return _then(_allocateNode(index, key, dataBlock, height), (newNode) {
-      return _then(_spliceNodeAtLevel(newNode, reversedUpdate, 0), (_) => newNode);
-    });
+    final newNode = res;
+    final spliceRes = _spliceNodeAtLevel(newNode, update, 0);
+    if (spliceRes is Future<void>) {
+      return spliceRes.then((_) => newNode);
+    }
+    return newNode;
   }
 
   FutureOr<void> _spliceNodeAtLevel(IndexNode newNode, List<IndexNode> update, int level) {
-    if (level >= newNode.levels) {
-      return null;
-    }
+    for (var curLevel = level; curLevel < newNode.levels; curLevel++) {
+      final pred = update[curLevel];
+      final oldNext = curLevel < pred.next.length ? pred.next[curLevel] : PageAddress.empty;
 
-    final pred = update[level];
-    final oldNext = level < pred.next.length ? pred.next[level] : PageAddress.empty;
+      newNode.next[curLevel] = oldNext;
+      newNode.prev[curLevel] = pred.position;
 
-    newNode.next[level] = oldNext;
-    newNode.prev[level] = pred.position;
-
-    return _then(
-      oldNext.isEmpty
-          ? null
-          : _then(getNode(oldNext), (oldNextNode) {
-              if (level < oldNextNode.prev.length) {
-                oldNextNode.prev[level] = newNode.position;
-                _pager.setDirty(oldNextNode.page!);
-              }
-              return null;
-            }),
-      (_) {
-        if (level < pred.next.length) {
-          pred.next[level] = newNode.position;
-          _pager.setDirty(pred.page!);
+      if (!oldNext.isEmpty) {
+        final res = getNode(oldNext);
+        if (res is Future<IndexNode>) {
+          return res.then((oldNextNode) {
+            if (curLevel < oldNextNode.prev.length) {
+              oldNextNode.prev[curLevel] = newNode.position;
+              _pager.setDirty(oldNextNode.page!);
+            }
+            return _spliceAfterOldNext(newNode, update, curLevel, pred);
+          });
         }
-        _pager.setDirty(newNode.page!);
-        return _spliceNodeAtLevel(newNode, update, level + 1);
-      },
-    );
+        if (curLevel < res.prev.length) {
+          res.prev[curLevel] = newNode.position;
+          _pager.setDirty(res.page!);
+        }
+      }
+
+      if (curLevel < pred.next.length) {
+        pred.next[curLevel] = newNode.position;
+        _pager.setDirty(pred.page!);
+      }
+      _pager.setDirty(newNode.page!);
+    }
+    return null;
+  }
+
+  FutureOr<void> _spliceAfterOldNext(IndexNode newNode, List<IndexNode> update, int curLevel, IndexNode pred) {
+    if (curLevel < pred.next.length) {
+      pred.next[curLevel] = newNode.position;
+      _pager.setDirty(pred.page!);
+    }
+    _pager.setDirty(newNode.page!);
+    return _spliceNodeAtLevel(newNode, update, curLevel + 1);
   }
 
   /// Removes [node] from the skip-list and its page.
@@ -215,9 +287,11 @@ class IndexService {
 
   /// Loads the node at [address].
   FutureOr<IndexNode> getNode(PageAddress address) {
-    return _then(_pager.getPage<IndexPage>(address.pageID), (page) {
-      return page.getNode(address.index)!;
-    });
+    final res = _pager.getPage<IndexPage>(address.pageID);
+    if (res is Future<IndexPage>) {
+      return res.then((page) => page.getNode(address.index)!);
+    }
+    return res.getNode(address.index)!;
   }
 
   /// Iterates all data nodes (excluding head/tail sentinels) in [order].

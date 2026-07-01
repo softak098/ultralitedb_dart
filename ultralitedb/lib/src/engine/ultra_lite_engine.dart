@@ -9,6 +9,7 @@ import 'disks/file_disk_service.dart';
 import 'disks/file_options.dart';
 import 'disks/stream_disk_service.dart';
 import 'pages/collection_page.dart';
+import 'pages/data_page.dart';
 import 'pages/index_page.dart';
 import 'query/query.dart';
 import 'services/cache_service.dart';
@@ -50,14 +51,34 @@ class UltraLiteEngine {
     return action(value);
   }
 
-  // ── Factory constructors ──────────────────────────────────────────────────
+  // ── Sync version of FutureOr methods ──────────────────────────────────────
 
-  static FutureOr<UltraLiteEngine> file(String filename, {FileOptions? options, String? password}) {
-    return _open(FileDiskService(filename, options: options), password: password);
+  static T _sync<T>(FutureOr<T> value) {
+    if (value is Future<T>) {
+      throw StateError(
+        'Expected synchronous result, but got Future. '
+        'Ensure database was opened with sync-compatible options (e.g. syncIO: true or memory).',
+      );
+    }
+    return value;
   }
 
-  static FutureOr<UltraLiteEngine> memory() {
-    return _open(StreamDiskService());
+  // ── Factory constructors ──────────────────────────────────────────────────
+
+  static Future<UltraLiteEngine> file(String filename, {FileOptions? options, String? password}) async {
+    return await _open(FileDiskService(filename, options: options), password: password);
+  }
+
+  static UltraLiteEngine fileSync(String filename, {FileOptions? options, String? password}) {
+    return _sync(_open(FileDiskService(filename, options: options), password: password));
+  }
+
+  static Future<UltraLiteEngine> memory() async {
+    return await _open(StreamDiskService());
+  }
+
+  static UltraLiteEngine memorySync() {
+    return _sync(_open(StreamDiskService()));
   }
 
   static FutureOr<UltraLiteEngine> _open(IDiskService disk, {String? password}) {
@@ -100,31 +121,69 @@ class UltraLiteEngine {
 
   /// Inserts [doc] into [collection]. Auto-generates `_id` if absent.
   /// Returns the `_id` value.
-  FutureOr<BsonValue> insert(String collection, BsonDocument doc, [BsonAutoId autoId = BsonAutoId.objectId]) {
+  Future<BsonValue> insert(String collection, BsonDocument doc, [BsonAutoId autoId = BsonAutoId.objectId]) async {
+    return await _insertInternal(collection, doc, autoId);
+  }
+
+  BsonValue insertSync(String collection, BsonDocument doc, [BsonAutoId autoId = BsonAutoId.objectId]) {
+    return _sync(_insertInternal(collection, doc, autoId));
+  }
+
+  FutureOr<BsonValue> _insertInternal(String collection, BsonDocument doc, [BsonAutoId autoId = BsonAutoId.objectId]) {
     _assertAlive();
-    return _then(_colSvc.getOrCreate(collection), (col) {
-      if (!doc.containsKey('_id') || doc['_id'].isNull) {
-        return _then(_generateId(col, autoId), (id) {
+    final colRes = _colSvc.getOrCreate(collection);
+    if (colRes is Future<CollectionPage>) {
+      return colRes.then((col) => _insertWithCol(col, doc, autoId));
+    }
+    return _insertWithCol(colRes, doc, autoId);
+  }
+
+  FutureOr<BsonValue> _insertWithCol(CollectionPage col, BsonDocument doc, BsonAutoId autoId) {
+    if (!doc.containsKey('_id') || doc['_id'].isNull) {
+      final idRes = _generateId(col, autoId);
+      if (idRes is Future<BsonValue>) {
+        return idRes.then((id) {
           doc['_id'] = id;
           return _doInsert(col, doc);
         });
       }
-      return _doInsert(col, doc);
-    });
+      doc['_id'] = idRes;
+    }
+    return _doInsert(col, doc);
   }
 
   FutureOr<BsonValue> _doInsert(CollectionPage col, BsonDocument doc) {
-    return _then(_data.insert(col, doc), (block) {
-      return _then(_addNodes(col.indexes.where((i) => i.isNotEmpty).toList(), 0, doc, block.position), (_) {
-        return _then(_autoCommit(), (_) => doc['_id']);
-      });
-    });
+    final blockRes = _data.insert(col, doc);
+    if (blockRes is Future<DataBlock>) {
+      return blockRes.then((block) => _doInsertNodes(col, doc, block.position));
+    }
+    return _doInsertNodes(col, doc, blockRes.position);
+  }
+
+  FutureOr<BsonValue> _doInsertNodes(CollectionPage col, BsonDocument doc, PageAddress blockAddr) {
+    final res = _addNodes(col.indexes, 0, doc, blockAddr);
+    if (res is Future<void>) {
+      return res.then((_) => _doInsertCommit(doc['_id']));
+    }
+    return _doInsertCommit(doc['_id']);
+  }
+
+  FutureOr<BsonValue> _doInsertCommit(BsonValue id) {
+    final res = _autoCommit();
+    if (res is Future<void>) {
+      return res.then((_) => id);
+    }
+    return id;
   }
 
   FutureOr<void> _addNodes(List<CollectionIndex> indexes, int index, BsonDocument doc, PageAddress blockAddr) {
     var i = index;
     while (i < indexes.length) {
       final idx = indexes[i];
+      if (idx.isEmpty) {
+        i++;
+        continue;
+      }
       final res = _indexer.addNode(idx, Query.getFieldValue(doc, idx.field), blockAddr);
       if (res is Future<IndexNode>) {
         return res.then((_) => _addNodes(indexes, i + 1, doc, blockAddr));
@@ -136,7 +195,19 @@ class UltraLiteEngine {
 
   /// Inserts all [docs] inside a single transaction.
   /// Returns the list of generated `_id` values.
-  FutureOr<List<BsonValue>> insertBulk(
+  Future<List<BsonValue>> insertBulk(
+    String collection,
+    Iterable<BsonDocument> docs, {
+    BsonAutoId autoId = BsonAutoId.objectId,
+  }) async {
+    return await _insertBulkInternal(collection, docs, autoId: autoId);
+  }
+
+  List<BsonValue> insertBulkSync(String collection, Iterable<BsonDocument> docs, {BsonAutoId autoId = BsonAutoId.objectId}) {
+    return _sync(_insertBulkInternal(collection, docs, autoId: autoId));
+  }
+
+  FutureOr<List<BsonValue>> _insertBulkInternal(
     String collection,
     Iterable<BsonDocument> docs, {
     BsonAutoId autoId = BsonAutoId.objectId,
@@ -151,14 +222,14 @@ class UltraLiteEngine {
     }
 
     // Otherwise wrap in one explicit transaction.
-    beginTrans();
+    beginTransSync();
     final res = _then(_insertBulkLoop(collection, docsList, 0, autoId, []), (results) {
-      return _then(commit(), (_) => results);
+      return _then(commitInternal(), (_) => results);
     });
 
     if (res is Future<List<BsonValue>>) {
       return res.catchError((e) {
-        return _then(rollback(), (_) => throw e);
+        return _then(rollbackInternal(), (_) => throw e);
       });
     }
     return res;
@@ -173,7 +244,7 @@ class UltraLiteEngine {
   ) {
     var i = index;
     while (i < docs.length) {
-      final res = insert(collection, docs[i], autoId);
+      final res = _insertInternal(collection, docs[i], autoId);
       if (res is Future<BsonValue>) {
         return res.then((id) {
           results.add(id);
@@ -190,7 +261,15 @@ class UltraLiteEngine {
 
   /// Updates the document identified by `doc['_id']`.
   /// Returns `true` if found and updated.
-  FutureOr<bool> update(String collection, BsonDocument doc) {
+  Future<bool> update(String collection, BsonDocument doc) async {
+    return await _updateInternal(collection, doc);
+  }
+
+  bool updateSync(String collection, BsonDocument doc) {
+    return _sync(_updateInternal(collection, doc));
+  }
+
+  FutureOr<bool> _updateInternal(String collection, BsonDocument doc) {
     _assertAlive();
     return _then(_colSvc.get(collection), (col) {
       if (col == null) return false;
@@ -244,7 +323,15 @@ class UltraLiteEngine {
   // ── Delete ────────────────────────────────────────────────────────────────
 
   /// Deletes the document with [id]. Returns `true` if found and deleted.
-  FutureOr<bool> delete(String collection, BsonValue id) {
+  Future<bool> delete(String collection, BsonValue id) async {
+    return await _deleteInternal(collection, id);
+  }
+
+  bool deleteSync(String collection, BsonValue id) {
+    return _sync(_deleteInternal(collection, id));
+  }
+
+  FutureOr<bool> _deleteInternal(String collection, BsonValue id) {
     _assertAlive();
     return _then(_colSvc.get(collection), (col) {
       if (col == null) return false;
@@ -263,6 +350,8 @@ class UltraLiteEngine {
       });
     });
   }
+
+  // ... (keeping _deleteFromIndexes as is as it is private)
 
   FutureOr<void> _deleteFromIndexes(List<CollectionIndex> indexes, int index, PageAddress addr, IndexNode pkNode) {
     var i = index;
@@ -286,10 +375,18 @@ class UltraLiteEngine {
   }
 
   /// Deletes all documents matching [query]. Returns count deleted.
-  FutureOr<int> deleteMany(String collection, Query query) {
+  Future<int> deleteMany(String collection, Query query) async {
+    return await _deleteManyInternal(collection, query);
+  }
+
+  int deleteManySync(String collection, Query query) {
+    return _sync(_deleteManyInternal(collection, query));
+  }
+
+  FutureOr<int> _deleteManyInternal(String collection, Query query) {
     _assertAlive();
     // Collect all ids first to avoid mutating the index during iteration.
-    return _then(find(collection, query: query), (docs) {
+    return _then(_findInternal(collection, query: query), (docs) {
       final ids = docs.map((d) => d['_id']).toList();
       return _deleteManyLoop(collection, ids, 0);
     });
@@ -298,7 +395,7 @@ class UltraLiteEngine {
   FutureOr<int> _deleteManyLoop(String collection, List<BsonValue> ids, int index) {
     var i = index;
     while (i < ids.length) {
-      final res = delete(collection, ids[i]);
+      final res = _deleteInternal(collection, ids[i]);
       if (res is Future<bool>) {
         return res.then((_) => _deleteManyLoop(collection, ids, i + 1));
       }
@@ -311,7 +408,21 @@ class UltraLiteEngine {
 
   /// Returns matching documents.
   /// Uses the best available index; falls back to a full _id-index scan.
-  FutureOr<Iterable<BsonDocument>> find(
+  Future<Iterable<BsonDocument>> find(
+    String collection, {
+    Query? query,
+    int skip = 0,
+    int limit = -1,
+    int order = Query.ascending,
+  }) async {
+    return await _findInternal(collection, query: query, skip: skip, limit: limit, order: order);
+  }
+
+  Iterable<BsonDocument> findSync(String collection, {Query? query, int skip = 0, int limit = -1, int order = Query.ascending}) {
+    return _sync(_findInternal(collection, query: query, skip: skip, limit: limit, order: order));
+  }
+
+  FutureOr<Iterable<BsonDocument>> _findInternal(
     String collection, {
     Query? query,
     int skip = 0,
@@ -326,7 +437,15 @@ class UltraLiteEngine {
   }
 
   /// Returns the document whose `_id` == [id], or `null`.
-  FutureOr<BsonDocument?> findById(String collection, BsonValue id) {
+  Future<BsonDocument?> findById(String collection, BsonValue id) async {
+    return await _findByIdInternal(collection, id);
+  }
+
+  BsonDocument? findByIdSync(String collection, BsonValue id) {
+    return _sync(_findByIdInternal(collection, id));
+  }
+
+  FutureOr<BsonDocument?> _findByIdInternal(String collection, BsonValue id) {
     _assertAlive();
     return _then(_colSvc.get(collection), (col) {
       if (col == null) return null;
@@ -337,25 +456,49 @@ class UltraLiteEngine {
   }
 
   /// Returns the first document matching [query], or `null`.
-  FutureOr<BsonDocument?> findOne(String collection, Query query) {
-    return _then(find(collection, query: query, limit: 1), (docs) {
+  Future<BsonDocument?> findOne(String collection, Query query) async {
+    return await _findOneInternal(collection, query);
+  }
+
+  BsonDocument? findOneSync(String collection, Query query) {
+    return _sync(_findOneInternal(collection, query));
+  }
+
+  FutureOr<BsonDocument?> _findOneInternal(String collection, Query query) {
+    return _then(_findInternal(collection, query: query, limit: 1), (docs) {
       return docs.firstOrNull;
     });
   }
 
   /// Count of documents matching [query] (all documents if [query] is null).
-  FutureOr<int> count(String collection, [Query? query]) {
+  Future<int> count(String collection, [Query? query]) async {
+    return await _countInternal(collection, query);
+  }
+
+  int countSync(String collection, [Query? query]) {
+    return _sync(_countInternal(collection, query));
+  }
+
+  FutureOr<int> _countInternal(String collection, [Query? query]) {
     _assertAlive();
     return _then(_colSvc.get(collection), (col) {
       if (col == null) return 0;
       if (query == null) return col.documentCount;
-      return _then(find(collection, query: query), (docs) => docs.length);
+      return _then(_findInternal(collection, query: query), (docs) => docs.length);
     });
   }
 
   /// `true` if at least one document matches [query].
-  FutureOr<bool> exists(String collection, Query query) {
-    return _then(find(collection, query: query, limit: 1), (docs) => docs.isNotEmpty);
+  Future<bool> exists(String collection, Query query) async {
+    return await _existsInternal(collection, query);
+  }
+
+  bool existsSync(String collection, Query query) {
+    return _sync(_existsInternal(collection, query));
+  }
+
+  FutureOr<bool> _existsInternal(String collection, Query query) {
+    return _then(_findInternal(collection, query: query, limit: 1), (docs) => docs.isNotEmpty);
   }
 
   // ── Index DDL ─────────────────────────────────────────────────────────────
@@ -363,7 +506,15 @@ class UltraLiteEngine {
   /// Creates an index on [field] if it does not already exist.
   /// Back-fills the index from existing documents.
   /// Returns `true` if created, `false` if it already existed.
-  FutureOr<bool> ensureIndex(String collection, String field, {bool unique = false}) {
+  Future<bool> ensureIndex(String collection, String field, {bool unique = false}) async {
+    return await _ensureIndexInternal(collection, field, unique: unique);
+  }
+
+  bool ensureIndexSync(String collection, String field, {bool unique = false}) {
+    return _sync(_ensureIndexInternal(collection, field, unique: unique));
+  }
+
+  FutureOr<bool> _ensureIndexInternal(String collection, String field, {bool unique = false}) {
     _assertAlive();
     return _then(_colSvc.getOrCreate(collection), (col) {
       if (col.getIndex(field) != null) return false;
@@ -377,6 +528,8 @@ class UltraLiteEngine {
       });
     });
   }
+
+  // ... (keeping _backfillIndexLoop as is)
 
   FutureOr<void> _backfillIndexLoop(CollectionIndex idx, String field, List<IndexNode> pkNodes, int index) {
     var i = index;
@@ -395,7 +548,15 @@ class UltraLiteEngine {
   }
 
   /// Drops the index for [field]. Returns `true` if it existed.
-  FutureOr<bool> dropIndex(String collection, String field) {
+  Future<bool> dropIndex(String collection, String field) async {
+    return await _dropIndexInternal(collection, field);
+  }
+
+  bool dropIndexSync(String collection, String field) {
+    return _sync(_dropIndexInternal(collection, field));
+  }
+
+  FutureOr<bool> _dropIndexInternal(String collection, String field) {
     _assertAlive();
     if (field == '_id') throw ArgumentError('Cannot drop the _id index');
     return _then(_colSvc.get(collection), (col) {
@@ -410,7 +571,15 @@ class UltraLiteEngine {
 
   // ── Collection DDL ────────────────────────────────────────────────────────
 
-  FutureOr<bool> dropCollection(String collection) {
+  Future<bool> dropCollection(String collection) async {
+    return await _dropCollectionInternal(collection);
+  }
+
+  bool dropCollectionSync(String collection) {
+    return _sync(_dropCollectionInternal(collection));
+  }
+
+  FutureOr<bool> _dropCollectionInternal(String collection) {
     _assertAlive();
     return _then(_colSvc.get(collection), (col) {
       if (col == null) return false;
@@ -420,7 +589,15 @@ class UltraLiteEngine {
     });
   }
 
-  FutureOr<bool> renameCollection(String oldName, String newName) {
+  Future<bool> renameCollection(String oldName, String newName) async {
+    return await _renameCollectionInternal(oldName, newName);
+  }
+
+  bool renameCollectionSync(String oldName, String newName) {
+    return _sync(_renameCollectionInternal(oldName, newName));
+  }
+
+  FutureOr<bool> _renameCollectionInternal(String oldName, String newName) {
     _assertAlive();
     return _then(_colSvc.get(oldName), (col) {
       if (col == null) return false;
@@ -436,7 +613,15 @@ class UltraLiteEngine {
 
   /// Switches to explicit-transaction mode.
   /// Returns `false` if already in explicit-transaction mode.
-  FutureOr<bool> beginTrans() {
+  Future<bool> beginTrans() async {
+    return await beginTransInternal();
+  }
+
+  bool beginTransSync() {
+    return _sync(beginTransInternal());
+  }
+
+  FutureOr<bool> beginTransInternal() {
     if (_userTransaction) return false;
     if (_trans.isActive) {
       return _then(_trans.commit(), (_) {
@@ -451,7 +636,15 @@ class UltraLiteEngine {
   }
 
   /// Commits the explicit transaction. Returns `false` if not in one.
-  FutureOr<bool> commit() {
+  Future<bool> commit() async {
+    return await commitInternal();
+  }
+
+  bool commitSync() {
+    return _sync(commitInternal());
+  }
+
+  FutureOr<bool> commitInternal() {
     if (!_userTransaction) return false;
     return _then(_trans.commit(), (_) {
       _userTransaction = false;
@@ -461,7 +654,15 @@ class UltraLiteEngine {
   }
 
   /// Rolls back the explicit transaction. Returns `false` if not in one.
-  FutureOr<bool> rollback() {
+  Future<bool> rollback() async {
+    return await rollbackInternal();
+  }
+
+  bool rollbackSync() {
+    return _sync(rollbackInternal());
+  }
+
+  FutureOr<bool> rollbackInternal() {
     if (!_userTransaction) return false;
     return _then(_trans.rollback(), (_) {
       _userTransaction = false;
@@ -471,14 +672,30 @@ class UltraLiteEngine {
   }
 
   /// Commit + begin a new transaction (auto-mode only; no-op in explicit mode).
-  FutureOr<void> checkpoint() {
+  Future<void> checkpoint() async {
+    await checkpointInternal();
+  }
+
+  void checkpointSync() {
+    _sync(checkpointInternal());
+  }
+
+  FutureOr<void> checkpointInternal() {
     if (!_userTransaction) return _trans.checkpoint();
     return null;
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-  FutureOr<void> dispose() {
+  Future<void> dispose() async {
+    await disposeInternal();
+  }
+
+  void disposeSync() {
+    _sync(disposeInternal());
+  }
+
+  FutureOr<void> disposeInternal() {
     if (_disposed) return null;
     return _then(_trans.isActive ? _trans.commit() : null, (_) {
       return _then(_disk.dispose(), (_) {

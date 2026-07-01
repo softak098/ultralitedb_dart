@@ -33,18 +33,24 @@ class UltraLiteDatabase {
     return action(value);
   }
 
-  // ── Factories ─────────────────────────────────────────────────────────────
-
-  static FutureOr<UltraLiteDatabase> file(String filename, {FileOptions? options, String? password, BsonMapper? mapper}) {
-    return _then(UltraLiteEngine.file(filename, options: options, password: password), (engine) {
-      return UltraLiteDatabase._(engine, mapper: mapper);
-    });
+  static Future<UltraLiteDatabase> file(String filename, {FileOptions? options, String? password, BsonMapper? mapper}) async {
+    final engine = await UltraLiteEngine.file(filename, options: options, password: password);
+    return UltraLiteDatabase._(engine, mapper: mapper);
   }
 
-  static FutureOr<UltraLiteDatabase> memory({BsonMapper? mapper}) {
-    return _then(UltraLiteEngine.memory(), (engine) {
-      return UltraLiteDatabase._(engine, mapper: mapper);
-    });
+  static UltraLiteDatabase fileSync(String filename, {FileOptions? options, String? password, BsonMapper? mapper}) {
+    final engine = UltraLiteEngine.fileSync(filename, options: options, password: password);
+    return UltraLiteDatabase._(engine, mapper: mapper);
+  }
+
+  static Future<UltraLiteDatabase> memory({BsonMapper? mapper}) async {
+    final engine = await UltraLiteEngine.memory();
+    return UltraLiteDatabase._(engine, mapper: mapper);
+  }
+
+  static UltraLiteDatabase memorySync({BsonMapper? mapper}) {
+    final engine = UltraLiteEngine.memorySync();
+    return UltraLiteDatabase._(engine, mapper: mapper);
   }
 
   UltraLiteDatabase._(UltraLiteEngine engine, {BsonMapper? mapper}) : _engine = engine, mapper = mapper ?? BsonMapper.global;
@@ -66,35 +72,52 @@ class UltraLiteDatabase {
 
   bool collectionExists(String name) => _engine.getCollectionNames().contains(name);
 
-  FutureOr<bool> dropCollection(String name) => _engine.dropCollection(name);
+  Future<bool> dropCollection(String name) => _engine.dropCollection(name);
+  bool dropCollectionSync(String name) => _engine.dropCollectionSync(name);
 
-  FutureOr<bool> renameCollection(String oldName, String newName) => _engine.renameCollection(oldName, newName);
+  Future<bool> renameCollection(String oldName, String newName) => _engine.renameCollection(oldName, newName);
+  bool renameCollectionSync(String oldName, String newName) => _engine.renameCollectionSync(oldName, newName);
 
   // ── Transactions ──────────────────────────────────────────────────────────
 
-  FutureOr<bool> beginTrans() => _engine.beginTrans();
-  FutureOr<bool> commit() => _engine.commit();
-  FutureOr<void> rollback() => _engine.rollback();
+  Future<bool> beginTrans() => _engine.beginTrans();
+  bool beginTransSync() => _engine.beginTransSync();
+
+  Future<bool> commit() => _engine.commit();
+  bool commitSync() => _engine.commitSync();
+
+  Future<void> rollback() => _engine.rollback();
+  void rollbackSync() => _engine.rollbackSync();
 
   /// Runs [action] inside a single explicit transaction.
   /// Commits on success; rolls back on any exception.
-  FutureOr<T> runInTransaction<T>(FutureOr<T> Function() action) {
-    return _then(beginTrans(), (_) {
-      final res = action();
-      final finalRes = _then(res, (val) {
-        return _then(commit(), (_) => val);
-      });
+  Future<T> runInTransaction<T>(Future<T> Function() action) async {
+    await beginTrans();
+    try {
+      final val = await action();
+      await commit();
+      return val;
+    } catch (e) {
+      await rollback();
+      rethrow;
+    }
+  }
 
-      if (finalRes is Future<T>) {
-        return finalRes.catchError((e) {
-          return _then(rollback(), (_) => throw e);
-        });
-      }
-      return finalRes;
-    });
+  /// Synchronous version of [runInTransaction].
+  T runInTransactionSync<T>(T Function() action) {
+    beginTransSync();
+    try {
+      final val = action();
+      commitSync();
+      return val;
+    } catch (e) {
+      rollbackSync();
+      rethrow;
+    }
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-  FutureOr<void> dispose() => _engine.dispose();
+  Future<void> dispose() => _engine.dispose();
+  void disposeSync() => _engine.disposeSync();
 }

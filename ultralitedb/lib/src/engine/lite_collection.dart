@@ -22,8 +22,8 @@ class LiteCollection<T> {
 
   // ── Helper for chaining FutureOr operations ────────────────────────────────
 
-  FutureOr<R> _then<T, R>(FutureOr<T> value, FutureOr<R> Function(T) action) {
-    if (value is Future<T>) {
+  FutureOr<R> _then<T1, R>(FutureOr<T1> value, FutureOr<R> Function(T1) action) {
+    if (value is Future<T1>) {
       return value.then((v) => action(v));
     }
     return action(value);
@@ -31,55 +31,80 @@ class LiteCollection<T> {
 
   // ── Insert ────────────────────────────────────────────────────────────────
 
-  FutureOr<BsonValue> insert(T item) => _engine.insert(_name, _toDoc(item), autoId);
+  Future<BsonValue> insert(T item) => _engine.insert(_name, _toDoc(item), autoId);
+  BsonValue insertSync(T item) => _engine.insertSync(_name, _toDoc(item), autoId);
 
-  FutureOr<List<BsonValue>> insertAll(Iterable<T> items) => _engine.insertBulk(_name, items.map(_toDoc), autoId: autoId);
+  Future<List<BsonValue>> insertAll(Iterable<T> items) => _engine.insertBulk(_name, items.map(_toDoc), autoId: autoId);
+  List<BsonValue> insertAllSync(Iterable<T> items) => _engine.insertBulkSync(_name, items.map(_toDoc), autoId: autoId);
 
   // ── Update ────────────────────────────────────────────────────────────────
 
-  FutureOr<bool> update(T item) => _engine.update(_name, _toDoc(item));
+  Future<bool> update(T item) => _engine.update(_name, _toDoc(item));
+  bool updateSync(T item) => _engine.updateSync(_name, _toDoc(item));
 
   // ── Delete ────────────────────────────────────────────────────────────────
 
-  FutureOr<bool> deleteById(BsonValue id) => _engine.delete(_name, id);
+  Future<bool> deleteById(BsonValue id) => _engine.delete(_name, id);
+  bool deleteByIdSync(BsonValue id) => _engine.deleteSync(_name, id);
 
-  FutureOr<int> deleteMany(Query query) => _engine.deleteMany(_name, query);
+  Future<int> deleteMany(Query query) => _engine.deleteMany(_name, query);
+  int deleteManySync(Query query) => _engine.deleteManySync(_name, query);
 
   // ── Find ──────────────────────────────────────────────────────────────────
 
-  FutureOr<Iterable<T>> find({Query? query, int skip = 0, int limit = -1, int order = Query.ascending}) {
-    return _then(_engine.find(_name, query: query, skip: skip, limit: limit, order: order), (docs) {
-      return docs.map(_fromDoc);
-    });
+  Future<Iterable<T>> find({Query? query, int skip = 0, int limit = -1, int order = Query.ascending}) async {
+    final docs = await _engine.find(_name, query: query, skip: skip, limit: limit, order: order);
+    return docs.map(_fromDoc);
   }
 
-  FutureOr<T?> findById(BsonValue id) {
-    return _then(_engine.findById(_name, id), (doc) {
-      return doc == null ? null : _fromDoc(doc);
-    });
+  Iterable<T> findSync({Query? query, int skip = 0, int limit = -1, int order = Query.ascending}) {
+    final docs = _engine.findSync(_name, query: query, skip: skip, limit: limit, order: order);
+    return docs.map(_fromDoc);
   }
 
-  FutureOr<T?> findOne(Query query) {
-    return _then(_engine.findOne(_name, query), (doc) {
-      return doc == null ? null : _fromDoc(doc);
-    });
+  Future<T?> findById(BsonValue id) async {
+    final doc = await _engine.findById(_name, id);
+    return doc == null ? null : _fromDoc(doc);
   }
 
-  FutureOr<List<T>> findAll({int order = Query.ascending}) {
-    return _then(find(order: order), (results) {
-      return results.toList();
-    });
+  T? findByIdSync(BsonValue id) {
+    final doc = _engine.findByIdSync(_name, id);
+    return doc == null ? null : _fromDoc(doc);
   }
 
-  FutureOr<int> count([Query? query]) => _engine.count(_name, query);
+  Future<T?> findOne(Query query) async {
+    final doc = await _engine.findOne(_name, query);
+    return doc == null ? null : _fromDoc(doc);
+  }
 
-  FutureOr<bool> exists(Query query) => _engine.exists(_name, query);
+  T? findOneSync(Query query) {
+    final doc = _engine.findOneSync(_name, query);
+    return doc == null ? null : _fromDoc(doc);
+  }
+
+  Future<List<T>> findAll({int order = Query.ascending}) async {
+    final results = await find(order: order);
+    return results.toList();
+  }
+
+  List<T> findAllSync({int order = Query.ascending}) {
+    final results = findSync(order: order);
+    return results.toList();
+  }
+
+  Future<int> count([Query? query]) => _engine.count(_name, query);
+  int countSync([Query? query]) => _engine.countSync(_name, query);
+
+  Future<bool> exists(Query query) => _engine.exists(_name, query);
+  bool existsSync(Query query) => _engine.existsSync(_name, query);
 
   // ── Index ─────────────────────────────────────────────────────────────────
 
-  FutureOr<bool> ensureIndex(String field, {bool unique = false}) => _engine.ensureIndex(_name, field, unique: unique);
+  Future<bool> ensureIndex(String field, {bool unique = false}) => _engine.ensureIndex(_name, field, unique: unique);
+  bool ensureIndexSync(String field, {bool unique = false}) => _engine.ensureIndexSync(_name, field, unique: unique);
 
-  FutureOr<bool> dropIndex(String field) => _engine.dropIndex(_name, field);
+  Future<bool> dropIndex(String field) => _engine.dropIndex(_name, field);
+  bool dropIndexSync(String field) => _engine.dropIndexSync(_name, field);
 
   // ── Conversion helpers ────────────────────────────────────────────────────
 

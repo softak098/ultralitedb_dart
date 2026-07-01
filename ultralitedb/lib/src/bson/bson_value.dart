@@ -1,5 +1,6 @@
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'bson_type.dart';
 import 'objectid.dart';
@@ -20,6 +21,7 @@ class BsonValue implements Comparable<BsonValue> {
 
   final BsonType type;
   final Object? _rawValue;
+  int __cachedSize = -1;
 
   /// Library-private constructor — use factory constructors or subclasses.
   BsonValue._init(this.type, this._rawValue);
@@ -147,7 +149,12 @@ class BsonValue implements Comparable<BsonValue> {
       case BsonType.decimal:
         return 16;
       case BsonType.string:
-        return 4 + utf8.encode(asString ?? '').length;
+        // Cache the encoded string length
+        if (_rawValue is String) {
+          final s = _rawValue as String;
+          return 4 + utf8.encode(s).length;
+        }
+        return 4 + (asStringOrEmpty.length); // Fallback but types are matching above
       case BsonType.binary:
         return 4 + (asBinary?.length ?? 0);
       case BsonType.objectId:
@@ -181,21 +188,31 @@ class BsonValue implements Comparable<BsonValue> {
       case BsonType.maxValue:
         return 0;
       case BsonType.boolean:
-        final a = asBoolean ?? false;
-        final b = other.asBoolean ?? false;
+        final a = _rawValue as bool;
+        final b = other._rawValue as bool;
         return a == b ? 0 : (a ? 1 : -1);
       case BsonType.int32:
       case BsonType.int64:
-        return asInt64OrZero.compareTo(other.asInt64OrZero);
+        final a = _rawValue as int;
+        final b = other._rawValue as int;
+        return a.compareTo(b);
       case BsonType.double:
       case BsonType.decimal:
-        return asDoubleOrZero.compareTo(other.asDoubleOrZero);
+        final a = _rawValue as double;
+        final b = other._rawValue as double;
+        return a.compareTo(b);
       case BsonType.string:
-        return asStringOrEmpty.compareTo(other.asStringOrEmpty);
+        final a = _rawValue as String;
+        final b = other._rawValue as String;
+        return a.compareTo(b);
       case BsonType.dateTime:
         return (asDateTime ?? unixEpoch).compareTo(other.asDateTime ?? unixEpoch);
       case BsonType.objectId:
         return (asObjectId ?? ObjectId()).compareTo(other.asObjectId ?? ObjectId());
+      case BsonType.array:
+        return (this as BsonArray)._compare(other as BsonArray);
+      case BsonType.document:
+        return (this as BsonDocument)._compare(other as BsonDocument);
       default:
         return 0;
     }

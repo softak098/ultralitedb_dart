@@ -31,37 +31,45 @@ class DataService {
 
   FutureOr<DataBlock> insert(CollectionPage col, BsonDocument doc) {
     final bytes = BsonWriter.serializeDocument(doc);
+    final res = _getOrCreateDataPage(col, bytes.length);
+    if (res is Future<DataPage>) {
+      return res.then((dataPage) => _insertInPage(col, bytes, dataPage));
+    }
+    return _insertInPage(col, bytes, res);
+  }
 
-    return _then(_getOrCreateDataPage(col, bytes.length), (dataPage) {
-      final slot = _nextSlot(dataPage.dataBlocks.keys);
+  FutureOr<DataBlock> _insertInPage(CollectionPage col, Uint8List bytes, DataPage dataPage) {
+    final slot = _nextSlot(dataPage.dataBlocks.keys);
 
-      // Inline as much as fits on the DataPage
-      final inlineLen = math.min(bytes.length, dataPage.freeBytes - DataBlock.fixedSize);
-      final inlineData = Uint8List.sublistView(bytes, 0, inlineLen);
+    // Inline as much as fits on the DataPage
+    final inlineLen = math.min(bytes.length, dataPage.freeBytes - DataBlock.fixedSize);
+    final inlineData = Uint8List.sublistView(bytes, 0, inlineLen);
 
-      final block = DataBlock(
-        position: PageAddress(dataPage.pageID, slot),
-        dataLength: bytes.length,
-        data: inlineData,
-        page: dataPage,
-      );
+    final block = DataBlock(
+      position: PageAddress(dataPage.pageID, slot),
+      dataLength: bytes.length,
+      data: inlineData,
+      page: dataPage,
+    );
 
-      dataPage.addBlock(block);
-      _pager.setDirty(dataPage);
+    dataPage.addBlock(block);
+    _pager.setDirty(dataPage);
 
-      // Write remaining bytes into ExtendPage chain
-      if (bytes.length > inlineLen) {
-        return _then(_writeExtendChain(block, bytes, inlineLen), (_) {
+    // Write remaining bytes into ExtendPage chain
+    if (bytes.length > inlineLen) {
+      final extRes = _writeExtendChain(block, bytes, inlineLen);
+      if (extRes is Future<void>) {
+        return extRes.then((_) {
           col.documentCount++;
           _pager.setDirty(col);
           return block;
         });
-      } else {
-        col.documentCount++;
-        _pager.setDirty(col);
-        return block;
       }
-    });
+    }
+
+    col.documentCount++;
+    _pager.setDirty(col);
+    return block;
   }
 
   FutureOr<DataBlock> update(CollectionPage col, PageAddress address, BsonDocument doc) {

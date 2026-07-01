@@ -11,6 +11,12 @@ class BsonWriter {
     return buf.toBytes();
   }
 
+  static Uint8List serializeArray(BsonArray arr) {
+    final buf = _Buf();
+    _writeArray(buf, arr);
+    return buf.toBytes();
+  }
+
   // ── internals ─────────────────────────────────────────────────────────────
 
   static void _writeDocument(_Buf buf, BsonDocument doc) {
@@ -91,28 +97,36 @@ class BsonWriter {
 /// Write accumulator. All multi-byte writes are little-endian.
 class _Buf {
   final BytesBuilder _bb = BytesBuilder(copy: false);
+  final ByteData _d8 = ByteData(8);
+
+  static final Map<String, Uint8List> _keyCache = {};
 
   void writeByte(int byte) => _bb.addByte(byte & 0xFF);
   void write(List<int> bytes) => _bb.add(bytes);
 
   void writeCString(String s) {
-    _bb.add(utf8.encode(s));
+    var bytes = _keyCache[s];
+    if (bytes == null) {
+      bytes = utf8.encode(s) as Uint8List;
+      if (_keyCache.length < 500) _keyCache[s] = bytes;
+    }
+    _bb.add(bytes);
     _bb.addByte(0); // null terminator
   }
 
   void writeInt32(int v) {
-    final d = ByteData(4)..setInt32(0, v, Endian.little);
-    _bb.add(d.buffer.asUint8List());
+    _d8.setInt32(0, v, Endian.little);
+    _bb.add(Uint8List.sublistView(_d8, 0, 4));
   }
 
   void writeInt64(int v) {
-    final d = ByteData(8)..setInt64(0, v, Endian.little);
-    _bb.add(d.buffer.asUint8List());
+    _d8.setInt64(0, v, Endian.little);
+    _bb.add(Uint8List.sublistView(_d8, 0, 8));
   }
 
   void writeFloat64(double v) {
-    final d = ByteData(8)..setFloat64(0, v, Endian.little);
-    _bb.add(d.buffer.asUint8List());
+    _d8.setFloat64(0, v, Endian.little);
+    _bb.add(Uint8List.sublistView(_d8, 0, 8));
   }
 
   Uint8List toBytes() => _bb.toBytes();

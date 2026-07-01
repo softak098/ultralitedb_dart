@@ -87,6 +87,21 @@ class BsonDocument extends BsonValue {
   @override
   int get hashCode => _fields.hashCode;
 
+  int _compare(BsonDocument other) {
+    final keys1 = _fields.keys.toList()..sort();
+    final keys2 = other._fields.keys.toList()..sort();
+
+    final len = math.min(keys1.length, keys2.length);
+    for (var i = 0; i < len; i++) {
+      final keyCmp = keys1[i].compareTo(keys2[i]);
+      if (keyCmp != 0) return keyCmp;
+
+      final valCmp = _fields[keys1[i]]!.compareTo(other._fields[keys2[i]]!);
+      if (valCmp != 0) return valCmp;
+    }
+    return keys1.length.compareTo(keys2.length);
+  }
+
   @override
   String toString() {
     final sb = StringBuffer('{');
