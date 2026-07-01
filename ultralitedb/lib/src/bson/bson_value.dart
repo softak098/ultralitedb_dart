@@ -151,8 +151,7 @@ class BsonValue implements Comparable<BsonValue> {
       case BsonType.string:
         // Cache the encoded string length
         if (_rawValue is String) {
-          final s = _rawValue as String;
-          return 4 + utf8.encode(s).length;
+          return 4 + utf8.encode(_rawValue).length;
         }
         return 4 + (asStringOrEmpty.length); // Fallback but types are matching above
       case BsonType.binary:

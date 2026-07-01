@@ -36,7 +36,7 @@ void tArrayBulkSync() {
 
     ps.add(p);
 
-    if (i > 0 && i % 50000 == 0) {
+    if (i > 0 && i % 30000 == 0) {
       col.insertAllSync(ps);
       ps.clear();
     }
@@ -67,7 +67,7 @@ Future<void> tArrayBulk() async {
 
     ps.add(p);
 
-    if (i > 0 && i % 50000 == 0) {
+    if (i > 0 && i % 30000 == 0) {
       await col.insertAll(ps);
       ps.clear();
     }
